@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "njlead"
+version = "0.1.0"
+description = "NJ school lead testing PDF extraction pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "pymupdf>=1.24",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.0",
+    "typer>=0.12",
+]
+
+# This registers `njlead` as a command-line tool.
+# After `pip install -e .`, you can type `njlead` in the terminal.
+[project.scripts]
+njlead = "njlead.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["njlead*"]

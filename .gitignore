@@ -1,0 +1,26 @@
+# Secrets - never commit the real key
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Local database and generated exports
+leads.db
+export_*.csv
+
+# PDF corpus - research data, not source code
+data/
+
+# Claude Code local settings, commands, and project documentation
+.claude/
+Claude/
+
+# Draft/proposed code kept locally for reference only
+proposed_ai_integration/
+
+# OS noise
+.DS_Store
+Thumbs.db

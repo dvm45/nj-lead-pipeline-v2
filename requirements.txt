@@ -1,0 +1,8 @@
+pymupdf>=1.24        # PDF text extraction (the library is imported as "fitz")
+sqlalchemy>=2.0      # database ORM - maps Python classes to SQLite tables
+pydantic>=2.0        # data validation - ensures extracted values are the right types
+typer>=0.12          # builds the command-line interface (njlead init, ingest, export)
+rapidfuzz>=3.0       # fuzzy string matching for joining PDF school names to NCES records
+openpyxl>=3.1        # reads the EDGE geocode XLSX file from NCES
+anthropic>=0.40      # Claude API client - powers the LLM extraction engine (njlead ingest --engine llm)
+python-dotenv>=1.0   # loads the ANTHROPIC_API_KEY from a local .env file (optional, keeps the key out of code)
