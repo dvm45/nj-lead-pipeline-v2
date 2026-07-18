@@ -18,9 +18,6 @@ data/
 .claude/
 Claude/
 
-# Draft/proposed code kept locally for reference only
-proposed_ai_integration/
-
 # OS noise
 .DS_Store
 Thumbs.db

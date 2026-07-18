@@ -61,59 +61,46 @@ def ingest(
         dir_okay=True,
         resolve_path=True,
     ),
-    engine: str = typer.Option(
-        "regex",
-        "--engine", "-e",
-        help="Extraction engine: 'regex' (default, offline) or 'llm' (Claude API).",
-    ),
     limit: int = typer.Option(
         None,
         "--limit", "-n",
-        help="Only process the first N files. Useful for a cheap test run with --engine llm.",
+        help="Only process the first N files. Useful for a cheap trial run.",
     ),
 ) -> None:
     """
     Walk a folder and ingest all PDF files into leads.db.
 
-    Files already in the database (matched by SHA-256 hash) are skipped.
-    Parse failures are logged to the issues table — the run never aborts.
+    One Claude API call per report — reads text and scanned pages,
+    fills our schema, and only writes rows that clear the validation
+    gate. Requires ANTHROPIC_API_KEY (see `njlead check-llm`).
 
-    Two engines are available:
-      regex (default) — the multi-strategy regex parser. Offline, free.
-      llm             — one Claude API call per report. Requires ANTHROPIC_API_KEY.
-                        Handles scanned PDFs and unknown lab formats. Costs
-                        pennies per report.
+    Files already in the database (matched by SHA-256 hash) are skipped.
+    Extraction problems are logged to the issues table — the run never aborts.
 
     After ingesting, check results with:
       /db-summary        — row counts per table
       /inspect-issues    — review anything that went wrong
     """
+    from njlead import config
     from njlead.db.session import init_db
     from njlead.ingest.loader import ingest_folder
 
-    engine = engine.lower().strip()
-    if engine not in {"regex", "llm"}:
-        typer.echo(f"Unknown engine '{engine}'. Choose 'regex' or 'llm'.", err=True)
-        raise typer.Exit(code=2)
-
-    # Preflight for the LLM engine — fail fast with a friendly message if the
-    # user forgot to add their key, instead of failing on the first file.
-    if engine == "llm":
-        from njlead import config
-        if not config.api_key_is_set():
-            typer.echo(
-                "No Anthropic API key found.\n"
-                "\n"
-                "The LLM engine needs a key. To set one up:\n"
-                "  1) Copy .env.example to .env\n"
-                "  2) Put your key in it:  ANTHROPIC_API_KEY=sk-ant-...\n"
-                "  3) Re-run this command.\n"
-                "\n"
-                "Or export the variable in your shell for this session only.\n"
-                "Confirm status any time with:  njlead check-llm",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+    # Preflight — fail fast with a friendly message if the user hasn't set up
+    # their key, instead of failing on the first file.
+    if not config.api_key_is_set():
+        typer.echo(
+            "No Anthropic API key found.\n"
+            "\n"
+            "The pipeline needs a key. To set one up:\n"
+            "  1) Copy .env.example to .env\n"
+            "  2) Put your key in it:  ANTHROPIC_API_KEY=sk-ant-...\n"
+            "  3) Re-run this command.\n"
+            "\n"
+            "Or export the variable in your shell for this session only.\n"
+            "Confirm status any time with:  njlead check-llm",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     # Auto-initialize the database if leads.db doesn't exist yet
     db_path = Path.cwd() / "leads.db"
@@ -124,20 +111,16 @@ def ingest(
         typer.echo("")
 
     typer.echo(f"Ingesting PDFs from: {folder}")
-    typer.echo(f"  engine: {engine}")
     if limit:
         typer.echo(f"  limit:  {limit} file(s)")
     typer.echo("")
 
-    # LLMConfigError propagates out of ingest_folder if e.g. the SDK isn't
-    # installed. Catch it here so the user sees a clean setup hint instead
-    # of a traceback.
+    # LLMConfigError propagates out of ingest_folder if the SDK isn't installed.
+    # We match by class name so this except doesn't require the anthropic SDK
+    # to be importable at all (the config check above only tests the key).
     try:
-        counts = ingest_folder(folder, engine=engine, limit=limit)
+        counts = ingest_folder(folder, limit=limit)
     except Exception as e:
-        # Only the LLM engine can raise here; the regex engine swallows errors
-        # per file. We match by class name so the anthropic SDK doesn't have
-        # to be importable when running the regex engine.
         if type(e).__name__ == "LLMConfigError":
             typer.echo("", err=True)
             typer.echo(f"LLM setup problem: {e}", err=True)
@@ -208,8 +191,8 @@ def check_llm() -> None:
         typer.echo("To install the SDK:  pip install -r requirements.txt")
     if key_set and sdk_ok:
         typer.echo("")
-        typer.echo("Ready. Try a small test run:")
-        typer.echo("  njlead ingest data/ --engine llm --limit 3")
+        typer.echo("Ready. Try a small test run first:")
+        typer.echo("  njlead ingest data/ --limit 3")
 
 
 # ---------------------------------------------------------------------------

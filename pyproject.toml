@@ -12,6 +12,10 @@ dependencies = [
     "sqlalchemy>=2.0",
     "pydantic>=2.0",
     "typer>=0.12",
+    "rapidfuzz>=3.0",
+    "openpyxl>=3.1",
+    "anthropic>=0.40",
+    "python-dotenv>=1.0",
 ]
 
 # This registers `njlead` as a command-line tool.

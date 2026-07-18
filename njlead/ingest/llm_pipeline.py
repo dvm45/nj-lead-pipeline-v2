@@ -7,19 +7,83 @@ Given a document's pages, this:
   3. writes accepted rows to samples/measurements; logs held rows and
      report-level problems to the issues table for human review.
 
-It reuses the same school de-duplication and issue-logging helpers as the regex
-path, so both engines write identical database shapes. Only the extraction step
-differs.
+This module also owns the two small DB-write helpers (get_or_create_school,
+log_issue) that used to live in loader.py. Keeping them here removes the
+old circular import between loader and llm_pipeline: now loader imports from
+llm_pipeline, and llm_pipeline imports from nothing in ingest except the
+extractor + validation modules.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from njlead.db.models import Document, Measurement, Sample
+from njlead.db.models import Document, Issue, Measurement, Sample, School
 
+
+# ---------------------------------------------------------------------------
+# Small DB-write helpers, shared with loader.py
+# ---------------------------------------------------------------------------
+
+def get_or_create_school(
+    session: Session, name: str | None, district: str | None
+) -> School | None:
+    """
+    Look up a school by name + district, creating a new row if needed.
+
+    Prevents duplicate school rows when the same school appears in many
+    different PDF reports. Returns None if we don't have a usable name.
+    """
+    if not name and not district:
+        return None
+
+    # The schools table requires a name — if we only have a district,
+    # skip creating the school row rather than crashing.
+    if not name:
+        return None
+
+    # Normalize: strip whitespace, title-case for consistent de-dup
+    name = name.strip().title() if name else None
+    district = district.strip().title() if district else None
+
+    existing = (
+        session.query(School)
+        .filter(School.name == name, School.district == district)
+        .first()
+    )
+    if existing:
+        return existing
+
+    school = School(name=name, district=district, state="NJ")
+    session.add(school)
+    session.flush()  # assigns school.id without committing the full transaction
+    return school
+
+
+def log_issue(
+    session: Session,
+    doc: Document,
+    issue_type: str,
+    detail: str,
+    page_num: int | None = None,
+) -> None:
+    """Write one row to the issues table."""
+    issue = Issue(
+        document_id=doc.id,
+        page_num=page_num,
+        issue_type=issue_type,
+        detail=detail,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(issue)
+
+
+# ---------------------------------------------------------------------------
+# LLM ingest orchestrator
+# ---------------------------------------------------------------------------
 
 def ingest_report_llm(
     session: Session, doc: Document, pages: list[dict], pdf_path: Path
@@ -32,8 +96,9 @@ def ingest_report_llm(
     Raises LLMConfigError (no API key) - the caller aborts the run with
     setup instructions rather than failing every file silently.
     """
-    # Lazy imports avoid a circular import with loader and keep the SDK optional.
-    from njlead.ingest.loader import _get_or_create_school, _log_issue
+    # Lazy import keeps the anthropic SDK optional at import time — the CLI's
+    # check-llm command can still tell the user the SDK is missing even when
+    # this module gets imported.
     from njlead.ingest.llm_extractor import extract_report, LLMExtractionError
     from njlead.ingest.validation import validate_report
 
@@ -41,7 +106,7 @@ def ingest_report_llm(
     try:
         report = extract_report(pages, pdf_path)
     except LLMExtractionError as e:
-        _log_issue(session, doc, "llm_error", str(e))
+        log_issue(session, doc, "llm_error", str(e))
         return 0, True
 
     # Source-span verification needs extracted text. Pure scans have none, so we
@@ -53,7 +118,7 @@ def ingest_report_llm(
         report.measurements, full_text, check_source_span=text_available
     )
 
-    school = _get_or_create_school(session, report.school_name, report.district)
+    school = get_or_create_school(session, report.school_name, report.district)
     # Persist the lab name as data (not a routing decision) if we learned one.
     if school is not None and report.lab_name and not school.lab_name:
         school.lab_name = report.lab_name.strip()
@@ -89,17 +154,17 @@ def ingest_report_llm(
     # Held rows -> human review queue.
     for m, reasons in held:
         who = m.sample_id or m.sample_location or "unknown sample"
-        _log_issue(
+        log_issue(
             session, doc, "needs_review",
             f"Row held by validation ({who}): " + "; ".join(reasons),
         )
 
     has_issues = bool(held)
     if report.school_name is None:
-        _log_issue(session, doc, "no_school_found", "LLM did not return a school name.")
+        log_issue(session, doc, "no_school_found", "LLM did not return a school name.")
         has_issues = True
     if written == 0 and not held:
-        _log_issue(session, doc, "no_measurements", "LLM returned no measurements for this report.")
+        log_issue(session, doc, "no_measurements", "LLM returned no measurements for this report.")
         has_issues = True
 
     return written, has_issues
