@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NJ Lead Pipeline</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        :root { --pico-font-size: 16px; }
+        .status-badge {
+            display: inline-block;
+            padding: 0.25em 0.75em;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        .status-idle { background: #e0e0e0; color: #333; }
+        .status-running { background: #fff3cd; color: #856404; }
+        .status-done { background: #d4edda; color: #155724; }
+        .status-error { background: #f8d7da; color: #721c24; }
+        #run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        table { font-size: 0.9em; }
+        .detail-text { font-style: italic; color: #666; margin-top: 0.5em; }
+    </style>
+</head>
+<body>
+    <main class="container">
+        <h1>NJ Lead Pipeline</h1>
+
+        <!-- Status + Run Button -->
+        <section>
+            <div style="display: flex; align-items: center; gap: 1em; margin-bottom: 1em;">
+                <form method="POST" action="/run" id="run-form" style="margin:0;">
+                    <button type="submit" id="run-btn" {% if run_state.running %}disabled{% endif %}>
+                        Run Pipeline
+                    </button>
+                </form>
+
+                <span id="status-badge" class="status-badge
+                    {% if run_state.step == 'error' %}status-error
+                    {% elif run_state.running %}status-running
+                    {% elif run_state.step == 'done' %}status-done
+                    {% else %}status-idle{% endif %}">
+                    {{ run_state.step | upper }}
+                </span>
+            </div>
+
+            <p id="detail-text" class="detail-text">{{ run_state.detail }}</p>
+
+            {% if run_state.error %}
+            <p style="color: #721c24;"><strong>Error:</strong> {{ run_state.error }}</p>
+            {% endif %}
+
+            {% if run_state.last_result %}
+            <small>
+                Last run ({{ run_state.last_run_time }}):
+                {{ run_state.last_result.ingested }} ingested,
+                {{ run_state.last_result.skipped }} skipped,
+                {{ run_state.last_result.failed }} failed
+            </small>
+            {% endif %}
+
+            {% if not drive_configured %}
+            <p><small>Google Drive not configured. Place PDFs directly in <code>input_pdfs/</code> folder.</small></p>
+            {% endif %}
+        </section>
+
+        <!-- CSV Downloads -->
+        <section>
+            <h2>Exports</h2>
+            {% if csv_files %}
+            <table>
+                <thead>
+                    <tr><th>File</th><th>Size</th><th></th></tr>
+                </thead>
+                <tbody>
+                    {% for f in csv_files[:10] %}
+                    <tr>
+                        <td>{{ f.name }}</td>
+                        <td>{{ "%.1f"|format(f.stat().st_size / 1024) }} KB</td>
+                        <td><a href="/downloads/{{ f.name }}">Download</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p>No exports yet. Run the pipeline to generate CSVs.</p>
+            {% endif %}
+        </section>
+
+        <!-- Recent Documents -->
+        <section>
+            <h2>Recent Files</h2>
+            {% if documents %}
+            <table>
+                <thead>
+                    <tr><th>Filename</th><th>Status</th><th>Ingested</th></tr>
+                </thead>
+                <tbody>
+                    {% for doc in documents[:30] %}
+                    <tr>
+                        <td>{{ doc.file_name }}</td>
+                        <td>
+                            <span class="status-badge
+                                {% if doc.status == 'ok' %}status-done
+                                {% elif doc.status == 'partial' %}status-running
+                                {% else %}status-error{% endif %}">
+                                {{ doc.status }}
+                            </span>
+                        </td>
+                        <td>{{ doc.ingested_at.strftime('%Y-%m-%d %H:%M') if doc.ingested_at else '' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p>No files ingested yet.</p>
+            {% endif %}
+        </section>
+    </main>
+
+    <!-- Poll for status while pipeline is running -->
+    <script>
+        let polling = {{ 'true' if run_state.running else 'false' }};
+
+        function pollStatus() {
+            if (!polling) return;
+            fetch('/status')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('status-badge').textContent = data.step.toUpperCase();
+                    document.getElementById('detail-text').textContent = data.detail || '';
+
+                    const badge = document.getElementById('status-badge');
+                    badge.className = 'status-badge';
+                    if (data.step === 'error') badge.classList.add('status-error');
+                    else if (data.running) badge.classList.add('status-running');
+                    else if (data.step === 'done') badge.classList.add('status-done');
+                    else badge.classList.add('status-idle');
+
+                    document.getElementById('run-btn').disabled = data.running;
+
+                    if (!data.running) {
+                        polling = false;
+                        // Reload to show updated tables
+                        setTimeout(() => location.reload(), 1000);
+                    }
+                })
+                .catch(() => {});
+        }
+
+        if (polling) {
+            setInterval(pollStatus, 2000);
+        }
+
+        // Start polling after clicking Run
+        document.getElementById('run-form').addEventListener('submit', function() {
+            polling = true;
+            document.getElementById('run-btn').disabled = true;
+            document.getElementById('status-badge').textContent = 'STARTING';
+            document.getElementById('status-badge').className = 'status-badge status-running';
+            setTimeout(() => setInterval(pollStatus, 2000), 1000);
+        });
+    </script>
+</body>
+</html>

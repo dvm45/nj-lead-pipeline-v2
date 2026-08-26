@@ -18,6 +18,11 @@ data/
 .claude/
 Claude/
 
+# Web UI local staging
+input_pdfs/
+output_csvs/
+credentials/
+
 # OS noise
 .DS_Store
 Thumbs.db

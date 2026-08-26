@@ -53,6 +53,18 @@ class ExtractedMeasurement(BaseModel):
         default=None,
         description="The fixture, separated from the location (e.g. 'Water Chiller Fountain', 'Bottle Filler', 'Sink'). Null if none named.",
     )
+    # District-wide "consolidated" PDFs (one file, many schools) — fill these
+    # per row so multi-school reports aren't misfiled under a single school.
+    # For single-school reports, leave both null; the report-level school_name /
+    # district apply to every row.
+    school_name: str | None = Field(
+        default=None,
+        description="School for THIS specific sample, ONLY when the report covers multiple schools and this row belongs to a school different from the report header. Leave null for single-school reports.",
+    )
+    district: str | None = Field(
+        default=None,
+        description="District for THIS specific sample, only when it differs from the report header. Leave null when unknown or same as the report header.",
+    )
 
     analyte: str = Field(default="lead", description="What was measured; almost always 'lead'.")
     result_ppb: float = Field(
@@ -80,7 +92,14 @@ class ExtractedMeasurement(BaseModel):
 
     source_text: str = Field(
         ...,
-        description="The verbatim line(s) from the report this row was read from. Used to verify the value really appears in the source.",
+        max_length=160,
+        description=(
+            "A short verbatim snippet (max 160 chars) from the report showing "
+            "the location and the result value together. Just enough that a "
+            "human could grep the source and find this exact row - do NOT quote "
+            "the whole line if it's long. This is used as an anti-hallucination "
+            "check, not for display."
+        ),
     )
     confidence: float = Field(
         ..., ge=0.0, le=1.0, description="Model's confidence in THIS row, 0-1."

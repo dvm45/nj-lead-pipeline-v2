@@ -40,6 +40,19 @@ RESULT_PPB_MAX = 50_000.0  # 5-digit ppb almost always = a misread zip/ID/phone
 
 _UNIT_PPB_EQUIVALENT = {"ug/l", "µg/l", "ppb", "ppb (ug/l)", "ug/l (ppb)"}
 _UNIT_NEEDS_CONVERSION = {"mg/l": 1000.0, "ppm": 1000.0}
+# OCR of "µg/L" on scanned reports commonly misreads the micro sign as
+# p/y/n/h/(nothing) and the slash-L as /l, il, o/l, etc. In practice these are
+# always µg/L — accept them so a bad glyph doesn't hold real data.
+_UNIT_SCAN_MISREADS_AS_PPB = {
+    "pg/l", "yg/l", "g/l", "ng/l", "hg/l", "yo/l", "ygil", "po/l", "pgil",
+}
+
+# Non-detects (ND / BDL / <MDL) are reported one of two ways depending on the lab:
+#   - as 0.0 (the value is "none")
+#   - as the reporting/method detection limit (usually 0.5-5 ppb)
+# Both are legitimate. When result_raw is an ND marker, accept any result_ppb in
+# this window rather than insisting it match the "0.0" derivation.
+_ND_RESULT_PPB_MAX = 5.0
 
 _NON_DETECT_RE = re.compile(
     r"(?:^|\b)(?:ND|BDL|non[-\s]?detect(?:ed)?|not\s+detected|none\s+detected|<\s*(?:MDL|RL|LOQ))\b",
@@ -76,6 +89,10 @@ def _normalize_text(s: str) -> str:
 def _derive_ppb_from_raw(result_raw: str, unit_raw: str | None) -> float | None:
     """Independently re-compute ppb from the verbatim text, the way a human would."""
     raw = result_raw.strip()
+    # Some reports (esp. European-formatted labs) use comma as the decimal
+    # separator, e.g. '4,76' meaning 4.76 ppb. Normalize before regex matching
+    # so we don't truncate to '4'.
+    raw = re.sub(r"(\d),(\d)", r"\1.\2", raw)
     if _NON_DETECT_RE.search(raw):
         return 0.0
     value: float | None = None
@@ -113,26 +130,86 @@ def _check_range_and_unit(m: ExtractedMeasurement) -> list[str]:
     if m.action_level_ppb is not None and not (1.0 <= m.action_level_ppb <= 100.0):
         problems.append(f"action_level_ppb {m.action_level_ppb} out of expected 1-100 range")
     if m.unit_raw is not None:
-        u = _normalize_text(m.unit_raw)
-        if u and u not in _UNIT_PPB_EQUIVALENT and u not in _UNIT_NEEDS_CONVERSION:
+        u = _normalize_text(m.unit_raw).rstrip(".,;: ")  # strip trailing punctuation
+        if (
+            u
+            and u not in _UNIT_PPB_EQUIVALENT
+            and u not in _UNIT_NEEDS_CONVERSION
+            and u not in _UNIT_SCAN_MISREADS_AS_PPB
+        ):
             problems.append(f"unrecognized unit '{m.unit_raw}'")
+    is_non_detect = bool(_NON_DETECT_RE.search(m.result_raw or ""))
     derived = _derive_ppb_from_raw(m.result_raw, m.unit_raw)
     if derived is None:
         problems.append(f"could not derive a number from result_raw '{m.result_raw}'")
+    elif is_non_detect and 0.0 <= m.result_ppb <= _ND_RESULT_PPB_MAX:
+        # ND may be recorded as 0.0 OR the reporting limit — both are valid.
+        pass
     elif abs(derived - m.result_ppb) > _PPB_ABS_TOL:
         problems.append(f"result_ppb {m.result_ppb} disagrees with value derived from raw '{m.result_raw}' (= {derived})")
     return problems
 
 
+_LOCATOR_STOPWORDS = {
+    # Function words the model often adds when synthesizing a location that
+    # aren't diagnostic of whether the location is grounded in the source.
+    "the", "of", "a", "an", "and", "or", "in", "on", "at", "by", "for",
+    "to", "with", "from", "no",
+}
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_LOCATOR_MIN_TOKEN_LEN = 2  # skip 1-char noise like "a" after normalization
+
+
+def _significant_tokens(s: str) -> list[str]:
+    """Extract lowercase alphanumeric tokens worth checking for presence."""
+    return [
+        t for t in _TOKEN_RE.findall(s.lower())
+        if len(t) >= _LOCATOR_MIN_TOKEN_LEN and t not in _LOCATOR_STOPWORDS
+    ]
+
+
 def _check_source_span(m: ExtractedMeasurement, page_text: str) -> list[str]:
+    """
+    Anti-hallucination gate. Confirms both facts the row asserts are grounded
+    in the source: the result value is really in the text, and the location
+    phrase's significant tokens are all really in the text.
+
+    Design notes:
+      - Earlier version required source_text as a contiguous substring. That
+        failed on multi-column tables (Bridgeton First-Draw / 30-sec-Flush)
+        because PyMuPDF interleaves columns, so "Sink, Asst Super Office 2.10"
+        is a real fact but never appears as one string.
+      - Next version required the location as a contiguous substring. That
+        failed when the model helpfully synthesized a location like
+        "Admin Building, Asst Super Office" from separate table headers.
+      - Current version splits the location into tokens and requires each
+        significant token to appear somewhere in the text. If any token is
+        absent, the location was invented. This still catches hallucinations
+        (a fake "Blueberry Wing" would have "blueberry" absent) while
+        accepting real cross-header synthesis.
+    """
     problems: list[str] = []
     norm_page = _normalize_text(page_text)
-    norm_span = _normalize_text(m.source_text)
     norm_raw = _normalize_text(m.result_raw)
-    if norm_span and norm_span not in norm_page:
-        problems.append("source_text not found in report text (possible hallucination)")
-    if norm_raw and norm_raw not in norm_span and norm_raw not in norm_page:
-        problems.append(f"result_raw '{m.result_raw}' not found in cited source")
+
+    # 1) result_raw must appear somewhere in the report text.
+    if norm_raw and norm_raw not in norm_page:
+        problems.append(f"result_raw '{m.result_raw}' not found anywhere in report")
+
+    # 2) Each significant token of the location must appear in the report text.
+    #    Fall back to sample_id if location isn't set.
+    locator = (m.sample_location or m.sample_id or "").strip()
+    if locator:
+        tokens = _significant_tokens(locator)
+        # normalize_text lowercases and NFKC-normalizes, so checking against
+        # norm_page catches unicode variants of the same character.
+        missing = [t for t in tokens if t not in norm_page]
+        if missing:
+            problems.append(
+                f"location '{locator}' has words not in report: {missing} "
+                f"(possible hallucination)"
+            )
+
     return problems
 
 

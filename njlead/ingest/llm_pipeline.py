@@ -109,25 +109,53 @@ def ingest_report_llm(
         log_issue(session, doc, "llm_error", str(e))
         return 0, True
 
-    # Source-span verification needs extracted text. Pure scans have none, so we
-    # skip that one check for image-only reports and rely on range/unit/confidence.
+    # Source-span verification needs extracted text. Skip it whenever ANY page
+    # in this report was sent as an image (is_blank=True): the model may have
+    # read the sample rows off that image, in which case the location and
+    # value legitimately won't appear in the text stream we'd check against.
+    # (Reports where the letterhead is text but the data table is a scan are
+    # the common case that broke earlier — see Ringwood_Cooper_ES.)
     full_text = "\n".join((p.get("raw_text") or "") for p in pages)
-    text_available = len(full_text.strip()) >= 30
+    any_image_page = any(p.get("is_blank") for p in pages)
+    text_available = len(full_text.strip()) >= 30 and not any_image_page
 
     accepted, held = validate_report(
         report.measurements, full_text, check_source_span=text_available
     )
 
-    school = get_or_create_school(session, report.school_name, report.district)
-    # Persist the lab name as data (not a routing decision) if we learned one.
-    if school is not None and report.lab_name and not school.lab_name:
-        school.lab_name = report.lab_name.strip()
+    # Report-level school is used as the default for rows that don't carry
+    # their own. Some district-wide PDFs return no header school but still
+    # populate per-row school_name for every measurement.
+    default_school = get_or_create_school(session, report.school_name, report.district)
+    if default_school is not None and report.lab_name and not default_school.lab_name:
+        default_school.lab_name = report.lab_name.strip()
+
+    # Cache per-row schools within this report to avoid a query per measurement
+    # when many rows share the same school.
+    school_cache: dict[tuple[str | None, str | None], "School | None"] = {}
+    if default_school is not None:
+        school_cache[(report.school_name, report.district)] = default_school
+
+    def _resolve_school(row_school: str | None, row_district: str | None):
+        # A row's school_name/district override the report header when set.
+        # Fall back to the report header, and finally to None.
+        name = row_school or report.school_name
+        district = row_district or report.district
+        key = (name, district)
+        if key in school_cache:
+            return school_cache[key]
+        s = get_or_create_school(session, name, district)
+        if s is not None and report.lab_name and not s.lab_name:
+            s.lab_name = report.lab_name.strip()
+        school_cache[key] = s
+        return s
 
     written = 0
     for m in accepted:
+        row_school = _resolve_school(m.school_name, m.district)
         sample = Sample(
             document_id=doc.id,
-            school_id=school.id if school else None,
+            school_id=row_school.id if row_school else None,
             sample_id=m.sample_id,
             location=m.sample_location,
             fixture_type=m.fixture_type,
@@ -140,6 +168,11 @@ def ingest_report_llm(
         exceeds = None
         if m.action_level_ppb is not None:
             exceeds = m.result_ppb > m.action_level_ppb
+        # Citation fields: the extractor stashes a (lo, hi) page range on
+        # each measurement instance via object.__setattr__. We keep the high
+        # end as the canonical source_page (a reviewer opening that page will
+        # find the row's source_text on it or a couple pages earlier).
+        source_page = getattr(m, "_source_page_hi", None)
         session.add(
             Measurement(
                 sample_id=sample.id,
@@ -147,6 +180,9 @@ def ingest_report_llm(
                 result_ppb=m.result_ppb,
                 action_level_ppb=m.action_level_ppb,
                 exceeds_action_level=exceeds,
+                source_text=m.source_text,
+                confidence=m.confidence,
+                source_page=source_page,
             )
         )
         written += 1
@@ -160,7 +196,13 @@ def ingest_report_llm(
         )
 
     has_issues = bool(held)
-    if report.school_name is None:
+    # A district-wide PDF may have no header school but a per-row school on
+    # every measurement — that's fine. Only flag "no school" when NOTHING
+    # resolved to a school.
+    any_row_had_school = any(
+        (m.school_name or report.school_name) for m in accepted
+    )
+    if not any_row_had_school and (report.school_name is None):
         log_issue(session, doc, "no_school_found", "LLM did not return a school name.")
         has_issues = True
     if written == 0 and not held:

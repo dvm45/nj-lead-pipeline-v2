@@ -59,10 +59,54 @@ _FILLER_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-# Common school suffixes/abbreviations that should also be neutralized
-_ABBREV_RE = re.compile(r"\b(e\.?s\.?|m\.?s\.?|h\.?s\.?|jr\.?|sr\.?|no\.?\s*\d+)\b", re.IGNORECASE)
+# Common school suffixes/abbreviations that should also be neutralized.
+# NOTE: don't include "no.\s*\d+" here — that would eat the school number
+# before _extract_school_number can pull it out.
+_ABBREV_RE = re.compile(r"\b(e\.?s\.?|m\.?s\.?|h\.?s\.?|jr\.?|sr\.?)\b", re.IGNORECASE)
 # Anything not alphanumeric or whitespace
 _PUNCT_RE = re.compile(r"[^\w\s]")
+
+# Patterns that pull a "school number" out of names like:
+#   "PS #10", "PS10", "PS 10", "P.S. 10",
+#   "School #10", "School No. 10", "School 10",
+#   "Public School #10", "School #6/Middle School"
+# The number must not be preceded by another digit (so "2024" isn't caught)
+# and not preceded by "Grade"/"Grades" (so "Grade 7" doesn't collide with
+# a school number). We deliberately do NOT try to pull numbers out of
+# arbitrary strings like "Building 42" — only school-number contexts.
+_SCHOOL_NUM_PATTERNS = [
+    # "PS 10", "P.S. #10", "P S 10"
+    re.compile(r"\bp\.?\s*s\.?\s*#?\s*(\d{1,3})\b", re.IGNORECASE),
+    # "School #10", "School No. 10", "School 10"
+    re.compile(r"\bschool\s*(?:no\.?\s*)?#?\s*(\d{1,3})\b", re.IGNORECASE),
+    # Bare leading "#10 …" or "…/School 10"
+    re.compile(r"#\s*(\d{1,3})\b"),
+]
+
+
+def _extract_school_number(name: str | None) -> int | None:
+    """
+    Pull the numeric identifier out of a numbered school name.
+
+    Returns None if the name doesn't look numbered.  Examples:
+      'PS#10'                    -> 10
+      'Ps 28'                    -> 28
+      'Public School #4'         -> 4
+      'School #6/Middle School'  -> 6
+      'Charles J. Riley/School 9'-> 9
+      'John F. Kennedy High'     -> None
+      'Building 42'              -> None  (not a school-number context)
+    """
+    if not name:
+        return None
+    for pat in _SCHOOL_NUM_PATTERNS:
+        m = pat.search(name)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                continue
+    return None
 
 
 def _normalize(name: str | None) -> str:
@@ -84,8 +128,19 @@ def _normalize(name: str | None) -> str:
 # Thresholds — empirically picked. The district threshold is intentionally
 # more permissive because PDF district names vary a lot ("Trenton",
 # "Trenton Public Schools", "Trenton BOE", "City of Trenton School District").
-DISTRICT_BLOCK_THRESHOLD = 75
-NAME_MATCH_THRESHOLD = 85
+# The district block uses token_set_ratio on filler-stripped names so
+# "Paterson Public School District" reduces to "paterson district". At 85
+# this keeps "Paterson Public" and "City of Paterson" together but drops
+# generic look-alikes like "Verona Public School District" (81) — the town
+# name has to actually match.
+DISTRICT_BLOCK_THRESHOLD = 85
+# 82 rather than 85: catches near-misses like "Dale Ave" vs "Dale Avenue"
+# (score 84.2) without opening the door to unrelated matches.
+NAME_MATCH_THRESHOLD = 82
+# When the school number matched, we already have identity — accept a
+# lower text-similarity score, since e.g. "ps 10" vs "school 10" scores
+# in the low 60s even though it's the correct match.
+NAME_MATCH_THRESHOLD_NUMBERED = 40
 
 
 class SchoolMatcher:
@@ -101,6 +156,9 @@ class SchoolMatcher:
         # Pre-computed normalized strings, parallel to _records.
         self._norm_names: list[str] = []
         self._norm_districts: list[str] = []
+        # Numeric identity for numbered schools, parallel to _records.
+        # None for schools without a number in the canonical name.
+        self._school_numbers: list[int | None] = []
         # Result cache keyed by (input_name, input_district).
         self._cache: dict[tuple[str, str], SchoolMatch | None] = {}
 
@@ -109,6 +167,7 @@ class SchoolMatcher:
                 self._records.append(row)
                 self._norm_names.append(_normalize(row["school_name"]))
                 self._norm_districts.append(_normalize(row["district_name"]))
+                self._school_numbers.append(_extract_school_number(row["school_name"]))
 
         if not self._records:
             raise RuntimeError(f"Lookup file {lookup_csv} is empty")
@@ -132,17 +191,55 @@ class SchoolMatcher:
 
         norm_name = _normalize(school_name)
         norm_district = _normalize(district)
+        input_number = _extract_school_number(school_name)
 
-        # Step 1: build the candidate index pool.
-        # If we have a district, block to records in that district.
-        # If not, search the full universe — slower but still feasible at 2,500 rows.
-        if norm_district:
-            candidate_indices = [
-                i for i, d in enumerate(self._norm_districts)
-                if fuzz.WRatio(norm_district, d) >= DISTRICT_BLOCK_THRESHOLD
-            ]
+        # District is required for identity. Without it, a numbered school
+        # like "PS4" would match Paterson OR Belleville OR any district's PS4,
+        # and a name-only match like "Rosa Parks" could hit the wrong town.
+        # Better to return None (row keeps blank address) than to fabricate
+        # a match against the wrong district.
+        if not norm_district:
+            self._cache[cache_key] = None
+            return None
+
+        # Step 1: build the candidate index pool by blocking to the
+        # input district. We use token_set_ratio (not WRatio) because the
+        # normalized district names are short and share the token
+        # "district" — WRatio's partial-match rewards inflate unrelated
+        # districts to 85+, while token_set_ratio requires the town-name
+        # tokens to actually overlap.
+        candidate_indices = [
+            i for i, d in enumerate(self._norm_districts)
+            if fuzz.token_set_ratio(norm_district, d) >= DISTRICT_BLOCK_THRESHOLD
+        ]
+
+        # Step 1b: numeric-identity filter. Numbered schools are their own
+        # namespace — "PS #10" must match "School 10", not any bare-named
+        # school that happens to fuzzy-match.
+        #   - If the input has a number: prefer candidates with the same
+        #     number. If none exist in the district (e.g. a school was
+        #     renamed and NCES dropped the number), fall through to
+        #     unnumbered candidates so a name-only match can still succeed
+        #     (e.g. "Ps#30 Mlk" -> "Dr. Martin Luther King Jr. Educational
+        #     Complex" via the "MLK" token). We do NOT fall through to
+        #     candidates with a *different* number, since that would be an
+        #     identity error.
+        #   - If the input has no number: exclude candidates that do have
+        #     one, so "John F. Kennedy" can't drift into "School 5".
+        numeric_identity_matched = False
+        if input_number is not None:
+            numbered = [i for i in candidate_indices if self._school_numbers[i] == input_number]
+            if numbered:
+                candidate_indices = numbered
+                numeric_identity_matched = True
+            else:
+                candidate_indices = [
+                    i for i in candidate_indices if self._school_numbers[i] is None
+                ]
         else:
-            candidate_indices = list(range(len(self._records)))
+            candidate_indices = [
+                i for i in candidate_indices if self._school_numbers[i] is None
+            ]
 
         if not candidate_indices:
             self._cache[cache_key] = None
@@ -161,7 +258,14 @@ class SchoolMatcher:
             return None
 
         _matched_name, score, idx_in_pool = best
-        if score < NAME_MATCH_THRESHOLD:
+        # When the numeric filter established identity, accept lower text
+        # similarity ("ps 10" vs "school 10" scores in the 60s but is the
+        # correct match). If it did NOT establish identity — either the
+        # input has no number, or the input's number had no NCES match in
+        # the district — require the regular strict threshold so a name
+        # rewrite has to actually be similar.
+        threshold = NAME_MATCH_THRESHOLD_NUMBERED if numeric_identity_matched else NAME_MATCH_THRESHOLD
+        if score < threshold:
             self._cache[cache_key] = None
             return None
 

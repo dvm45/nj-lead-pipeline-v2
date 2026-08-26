@@ -46,7 +46,9 @@ CSV_COLUMNS = [
     "sample_location",
     "fixture_type",
     "sample_date",
+    "year",
     "lead_concentration_ppb",
+    "source_file",
 ]
 
 
@@ -175,6 +177,10 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                 district_out = (match.district_name if match else (school.district if school else "")) or ""
                 school_name_out = (match.school_name if match else (school.name if school else "")) or ""
 
+                year_out = sample.test_year
+                if year_out is None and sample.sample_date is not None:
+                    year_out = sample.sample_date.year
+
                 writer.writerow({
                     "county": match.county if match else "",
                     "district": district_out,
@@ -185,7 +191,9 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                     "sample_location": sample.location or "",
                     "fixture_type": sample.fixture_type or "",
                     "sample_date": sample.sample_date.isoformat() if sample.sample_date else "",
+                    "year": year_out if year_out is not None else "",
                     "lead_concentration_ppb": m.result_ppb,
+                    "source_file": doc.file_name,
                 })
 
     # --- Step 4: write the unmatched log -------------------------------

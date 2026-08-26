@@ -117,17 +117,11 @@ def _ingest_one(session: Session, path: Path) -> str:
     # LLMConfigError (missing key / SDK) is deliberately NOT caught here — it
     # would repeat on every file, so it propagates and the caller aborts the
     # whole run with setup instructions.
+    # ingest_report_llm already logs no_measurements / no_school_found /
+    # needs_review / llm_error internally. Don't duplicate those checks here.
     total_measurements, has_issues = ingest_report_llm(
         session, doc, pages_payload, path
     )
-
-    # If we processed pages but the model found zero measurements
-    if total_measurements == 0 and not extracted.failed:
-        log_issue(
-            session, doc, "no_measurements",
-            "No lead measurement values were extracted from any page in this file.",
-        )
-        has_issues = True
 
     # Downgrade status if there were any issues
     if has_issues and total_measurements > 0:

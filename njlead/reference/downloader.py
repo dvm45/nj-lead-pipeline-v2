@@ -36,9 +36,10 @@ from pathlib import Path
 CCD_DIRECTORY_URL = (
     "https://nces.ed.gov/ccd/Data/zip/ccd_sch_029_2324_w_1a_073124.zip"
 )
-# Format: EDGE_GEOCODE_PUBLICSCH_<endYYYY>.xlsx
+# Format: EDGE_GEOCODE_PUBLICSCH_<endYY><startYY>.zip
+# Newer EDGE releases (2223+) ship the XLSX inside a ZIP.
 EDGE_GEOCODE_URL = (
-    "https://nces.ed.gov/programs/edge/data/EDGE_GEOCODE_PUBLICSCH_2324.xlsx"
+    "https://nces.ed.gov/programs/edge/data/EDGE_GEOCODE_PUBLICSCH_2324.zip"
 )
 
 # A polite User-Agent — some servers reject default urllib (Python-urllib/3.x)
@@ -101,20 +102,27 @@ def download_ccd(year: int, dest_dir: Path) -> Path:
         # Pick the largest CSV (skip any small README/metadata CSVs)
         csv_name = max(csv_names, key=lambda n: zf.getinfo(n).file_size)
 
-        # Step 3: stream-read the CSV, filter to NJ, write a slim version
+        # Step 3: stream-read the CSV, filter to NJ, write a slim version.
+        # NMCNTY (county name) was dropped from the CCD directory in the
+        # 2023-24 release — treat it as optional and leave the column blank
+        # when it's absent. Address and coordinates are the load-bearing
+        # location fields; county is nice-to-have.
         out_path = dest_dir / f"ccd_nj_{year}.csv"
-        keep_cols = [
+        required_cols = [
             "NCESSCH", "LEAID", "SCH_NAME", "LEA_NAME",
-            "LSTREET1", "LSTREET2", "LCITY", "LSTATE", "LZIP", "NMCNTY",
+            "LSTREET1", "LSTREET2", "LCITY", "LSTATE", "LZIP",
         ]
+        optional_cols = ["NMCNTY"]
+        keep_cols = required_cols + optional_cols
 
         with zf.open(csv_name) as zfile, open(out_path, "w", newline="", encoding="utf-8") as out:
             # Decode the CSV stream (CCD is UTF-8 with BOM in some years)
             text_stream = (line.decode("utf-8-sig") for line in zfile)
             reader = csv.DictReader(text_stream)
 
-            # Validate that the columns we want are present
-            missing = [c for c in keep_cols if c not in reader.fieldnames]
+            # Only require the load-bearing columns; missing optional ones
+            # just become empty strings in the output.
+            missing = [c for c in required_cols if c not in reader.fieldnames]
             if missing:
                 raise RuntimeError(
                     f"CCD CSV is missing expected columns: {missing}\n"
@@ -149,9 +157,26 @@ def download_edge_geocodes(year: int, dest_dir: Path) -> Path:
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    xlsx_path = dest_dir / f"edge_geocodes_{year}.xlsx"
+    # NCES ships EDGE as a ZIP containing an XLSX (as of the 2023-24 release).
+    # We download the ZIP, extract the XLSX to a temp path, then load it.
+    zip_path = dest_dir / f"edge_geocodes_{year}.zip"
     print(f"  downloading EDGE geocodes: {EDGE_GEOCODE_URL}")
-    _download(EDGE_GEOCODE_URL, xlsx_path)
+    _download(EDGE_GEOCODE_URL, zip_path)
+
+    xlsx_path = None
+    with zipfile.ZipFile(zip_path) as zf:
+        xlsx_names = [n for n in zf.namelist() if n.lower().endswith(".xlsx")]
+        if not xlsx_names:
+            raise RuntimeError(f"No XLSX found inside {zip_path}")
+        # Pick the largest XLSX (skip small README/metadata files)
+        inner = max(xlsx_names, key=lambda n: zf.getinfo(n).file_size)
+        xlsx_path = dest_dir / f"edge_geocodes_{year}.xlsx"
+        with zf.open(inner) as src, open(xlsx_path, "wb") as dst:
+            while True:
+                chunk = src.read(65536)
+                if not chunk:
+                    break
+                dst.write(chunk)
 
     # Lazy import so installing this package doesn't fail if openpyxl is missing
     # (e.g. if a user only ever runs `njlead init` and `njlead ingest`).
@@ -199,6 +224,7 @@ def download_edge_geocodes(year: int, dest_dir: Path) -> Path:
 
     wb.close()
     xlsx_path.unlink(missing_ok=True)
+    zip_path.unlink(missing_ok=True)
     print(f"  EDGE -> {out_path} ({kept} NJ geocodes)")
     return out_path
 

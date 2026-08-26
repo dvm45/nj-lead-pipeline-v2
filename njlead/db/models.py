@@ -222,6 +222,21 @@ class Measurement(Base):
     # True if result_ppb > action_level_ppb (set automatically on insert)
     exceeds_action_level: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
+    # --- Citation fields (populated by the LLM engine) -------------------
+    # A short verbatim snippet (~160 chars) the model quoted from the report
+    # to prove this row exists. Used by the validation gate and preserved
+    # here so a human reviewer can grep the source PDF and find the row.
+    source_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # The model's own confidence in this row (0.0 - 1.0). Preserved so low-
+    # confidence rows can be surfaced in review UIs even after ingest.
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # 1-indexed page number the row was extracted from. When a report is
+    # batched, this is the last page of the batch (the model doesn't return
+    # per-row page numbers). Nullable because pre-B rows have no value.
+    source_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     sample: Mapped["Sample"] = relationship("Sample", back_populates="measurements")
 
 

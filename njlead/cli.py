@@ -86,20 +86,35 @@ def ingest(
     from njlead.ingest.loader import ingest_folder
 
     # Preflight — fail fast with a friendly message if the user hasn't set up
-    # their key, instead of failing on the first file.
+    # credentials for whichever provider is selected, instead of failing on
+    # the first file.
     if not config.api_key_is_set():
-        typer.echo(
-            "No Anthropic API key found.\n"
-            "\n"
-            "The pipeline needs a key. To set one up:\n"
-            "  1) Copy .env.example to .env\n"
-            "  2) Put your key in it:  ANTHROPIC_API_KEY=sk-ant-...\n"
-            "  3) Re-run this command.\n"
-            "\n"
-            "Or export the variable in your shell for this session only.\n"
-            "Confirm status any time with:  njlead check-llm",
-            err=True,
-        )
+        if config.LLM_PROVIDER == "bedrock":
+            typer.echo(
+                "No AWS credentials found for Bedrock.\n"
+                "\n"
+                "The pipeline needs AWS credentials in one of these places:\n"
+                "  1) Run:  aws configure   (writes ~/.aws/credentials)\n"
+                "  2) OR set env vars: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY\n"
+                "  3) OR (on EC2/ECS) an attached instance role\n"
+                "\n"
+                f"Region currently set to: {config.AWS_REGION}\n"
+                "Confirm status any time with:  njlead check-llm",
+                err=True,
+            )
+        else:
+            typer.echo(
+                "No Anthropic API key found.\n"
+                "\n"
+                "The pipeline needs a key. To set one up:\n"
+                "  1) Copy .env.example to .env\n"
+                "  2) Put your key in it:  ANTHROPIC_API_KEY=sk-ant-...\n"
+                "  3) Re-run this command.\n"
+                "\n"
+                "Or export the variable in your shell for this session only.\n"
+                "Confirm status any time with:  njlead check-llm",
+                err=True,
+            )
         raise typer.Exit(code=1)
 
     # Auto-initialize the database if leads.db doesn't exist yet
@@ -154,25 +169,34 @@ def check_llm() -> None:
     """
     Report LLM configuration status.
 
-    Spends nothing — never contacts the API. Just prints whether an
-    Anthropic API key was found, which model is configured, and what
-    confidence threshold the validation gate is using. Safe to run
-    before you have a key set up.
+    Spends nothing — never contacts the API. Just prints which provider
+    is selected, whether credentials were found, which model is configured,
+    and what confidence threshold the validation gate is using. Safe to run
+    before you have anything set up.
     """
     from njlead import config
 
-    key_set = config.api_key_is_set()
+    creds_ok = config.api_key_is_set()
+
     typer.echo("LLM engine configuration")
     typer.echo("-" * 40)
-    typer.echo(f"  API key set:           {'yes' if key_set else 'no'}")
-    typer.echo(f"  Model:                 {config.LLM_MODEL}")
+    typer.echo(f"  Provider:              {config.LLM_PROVIDER}")
+
+    if config.LLM_PROVIDER == "bedrock":
+        typer.echo(f"  AWS region:            {config.AWS_REGION}")
+        typer.echo(f"  Bedrock model ID:      {config.BEDROCK_MODEL_ID}")
+        typer.echo(f"  AWS credentials found: {'yes' if creds_ok else 'no'}")
+    else:
+        typer.echo(f"  Anthropic model:       {config.ANTHROPIC_MODEL}")
+        typer.echo(f"  API key set:           {'yes' if creds_ok else 'no'}")
+
     typer.echo(f"  Max tokens:            {config.LLM_MAX_TOKENS}")
     typer.echo(f"  Confidence threshold:  {config.CONFIDENCE_THRESHOLD}")
     typer.echo(f"  Scan render DPI:       {config.SCAN_RENDER_DPI}")
     typer.echo("-" * 40)
 
-    # Show whether the SDK itself is importable — that's the other thing that
-    # would stop the LLM engine from running (and doesn't need a key to check).
+    # SDK checks — the anthropic SDK is required for both providers; boto3
+    # is only required for Bedrock.
     try:
         import anthropic  # noqa: F401
         sdk_ok = True
@@ -180,16 +204,34 @@ def check_llm() -> None:
         sdk_ok = False
     typer.echo(f"  anthropic SDK installed: {'yes' if sdk_ok else 'no'}")
 
-    if not key_set:
+    boto_ok = True  # Only relevant for Bedrock; assume fine otherwise
+    if config.LLM_PROVIDER == "bedrock":
+        try:
+            import boto3  # noqa: F401
+            boto_ok = True
+        except ImportError:
+            boto_ok = False
+        typer.echo(f"  boto3 installed:         {'yes' if boto_ok else 'no'}")
+
+    # Setup hints for whatever piece is missing
+    if not creds_ok:
         typer.echo("")
-        typer.echo("To set the API key:")
-        typer.echo("  1) cp .env.example .env")
-        typer.echo("  2) Put your key in .env:  ANTHROPIC_API_KEY=sk-ant-...")
-        typer.echo("  3) Re-run:  njlead check-llm")
-    if not sdk_ok:
+        if config.LLM_PROVIDER == "bedrock":
+            typer.echo("To provide AWS credentials, pick one:")
+            typer.echo("  - aws configure       (writes ~/.aws/credentials)")
+            typer.echo("  - set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars")
+            typer.echo("  - (on EC2/ECS) attach an instance role with Bedrock permissions")
+        else:
+            typer.echo("To set the API key:")
+            typer.echo("  1) copy .env.example .env")
+            typer.echo("  2) Put your key in .env:  ANTHROPIC_API_KEY=sk-ant-...")
+            typer.echo("  3) Re-run:  njlead check-llm")
+
+    if not sdk_ok or not boto_ok:
         typer.echo("")
-        typer.echo("To install the SDK:  pip install -r requirements.txt")
-    if key_set and sdk_ok:
+        typer.echo("To install missing packages:  pip install -r requirements.txt")
+
+    if creds_ok and sdk_ok and boto_ok:
         typer.echo("")
         typer.echo("Ready. Try a small test run first:")
         typer.echo("  njlead ingest data/ --limit 3")

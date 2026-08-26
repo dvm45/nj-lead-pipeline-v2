@@ -1,0 +1,17 @@
+[Unit]
+Description=NJ Lead Pipeline Web UI
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/nj_lead_pipeline_v2
+EnvironmentFile=/home/ec2-user/nj_lead_pipeline_v2/.env
+Environment="NJLEAD_DB=/home/ec2-user/nj_lead_pipeline_v2/leads.db"
+Environment="NJLEAD_LLM_PROVIDER=bedrock"
+ExecStart=/home/ec2-user/nj_lead_pipeline_v2/.venv/bin/gunicorn -w 1 -b 0.0.0.0:80 webapp.app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
