@@ -130,6 +130,16 @@ def api_key_is_set() -> bool:
         shared = Path.home() / ".aws" / "credentials"
         if shared.exists():
             return True
+        # EC2/ECS instance role — ask boto3 to resolve credentials from the
+        # metadata service. This covers IAM roles attached to the instance.
+        try:
+            import botocore.session
+            session = botocore.session.get_session()
+            creds = session.get_credentials()
+            if creds is not None:
+                return True
+        except Exception:
+            pass
         return False
 
     # Unknown provider string - treat as unconfigured.
