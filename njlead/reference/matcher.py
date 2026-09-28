@@ -121,6 +121,57 @@ def _normalize(name: str | None) -> str:
     return s
 
 
+# District normalization — different from school-name normalization because
+# district strings have their own noise patterns (BOE, MUA, suffixes).
+_DISTRICT_ABBREVS = {
+    "boe": "board of education",
+    "wpboe": "woodland park board of education",
+    "mua": "municipal utilities authority",
+    "twp": "township",
+    "boro": "borough",
+    "bd": "board",
+    "ed": "education",
+}
+
+_DISTRICT_NOISE_RE = re.compile(
+    r"\b("
+    r"board\s+of\s+education"
+    r"|municipal\s+utilities?\s+authority"
+    r"|public\s+school\s+district"
+    r"|public\s+schools?"
+    r"|school\s+district"
+    r"|school\s+system"
+    r"|schools?"
+    r"|district"
+    r"|regional"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_district(name: str | None) -> str:
+    """
+    Normalize a district name to its core town/township tokens.
+
+    'Wayne Township Board Of Education' → 'wayne township'
+    'Ringwood Boe' → 'ringwood'
+    'Paterson Public Schools' → 'paterson'
+    'Wpboe' → 'woodland park'
+    """
+    if not name:
+        return ""
+    s = name.lower().strip()
+    # Expand abbreviations first (before stripping noise)
+    for abbr, expansion in _DISTRICT_ABBREVS.items():
+        s = re.sub(rf"\b{re.escape(abbr)}\b", expansion, s)
+    s = _DISTRICT_NOISE_RE.sub(" ", s)
+    s = _PUNCT_RE.sub(" ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    # Strip trailing numbers (e.g. "Ringwood Boe #9041" → "ringwood")
+    s = re.sub(r"\s*#?\d+$", "", s).strip()
+    return s
+
+
 # -----------------------------------------------------------------------------
 # Matcher
 # -----------------------------------------------------------------------------
@@ -166,7 +217,7 @@ class SchoolMatcher:
             for row in csv.DictReader(f):
                 self._records.append(row)
                 self._norm_names.append(_normalize(row["school_name"]))
-                self._norm_districts.append(_normalize(row["district_name"]))
+                self._norm_districts.append(_normalize_district(row["district_name"]))
                 self._school_numbers.append(_extract_school_number(row["school_name"]))
 
         if not self._records:
@@ -190,7 +241,7 @@ class SchoolMatcher:
             return self._cache[cache_key]
 
         norm_name = _normalize(school_name)
-        norm_district = _normalize(district)
+        norm_district = _normalize_district(district)
         input_number = _extract_school_number(school_name)
 
         # District is required for identity. Without it, a numbered school

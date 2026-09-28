@@ -114,6 +114,13 @@ def _ingest_one(session: Session, path: Path) -> str:
         for p in extracted.pages
     ]
 
+    # Filter noise pages (COC forms, cover letters, lab boilerplate) before
+    # sending to the LLM. Page 1 and scanned pages are always kept.
+    from njlead.ingest.page_classifier import filter_noise_pages
+    pages_payload, dropped = filter_noise_pages(pages_payload, pdf_path=path)
+    if dropped:
+        print(f"[filter] dropped {dropped} noise page(s)", end=" ", flush=True)
+
     # LLMConfigError (missing key / SDK) is deliberately NOT caught here — it
     # would repeat on every file, so it propagates and the caller aborts the
     # whole run with setup instructions.

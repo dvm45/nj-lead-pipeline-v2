@@ -89,10 +89,10 @@ def _normalize_text(s: str) -> str:
 def _derive_ppb_from_raw(result_raw: str, unit_raw: str | None) -> float | None:
     """Independently re-compute ppb from the verbatim text, the way a human would."""
     raw = result_raw.strip()
-    # Some reports (esp. European-formatted labs) use comma as the decimal
-    # separator, e.g. '4,76' meaning 4.76 ppb. Normalize before regex matching
-    # so we don't truncate to '4'.
-    raw = re.sub(r"(\d),(\d)", r"\1.\2", raw)
+    # Thousands separator: comma followed by exactly 3 digits (e.g. "2,260" → "2260")
+    raw = re.sub(r"(\d),(\d{3})(?!\d)", r"\1\2", raw)
+    # European decimal separator: comma followed by 1-2 digits (e.g. "4,76" → "4.76")
+    raw = re.sub(r"(\d),(\d{1,2})(?!\d)", r"\1.\2", raw)
     if _NON_DETECT_RE.search(raw):
         return 0.0
     value: float | None = None

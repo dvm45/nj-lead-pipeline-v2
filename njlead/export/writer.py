@@ -45,11 +45,26 @@ CSV_COLUMNS = [
     "sample_id",
     "sample_location",
     "fixture_type",
+    "draw_type",
     "sample_date",
     "year",
     "lead_concentration_ppb",
+    "confidence",
+    "source_page",
     "source_file",
 ]
+
+
+def _county_from_path(file_path: str) -> str:
+    """Extract county from a document's stored file path (e.g. '.../Passaic County/...' → 'Passaic')."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    # Normalize to forward slashes for consistent parsing
+    parts = PureWindowsPath(file_path).parts if "\\" in file_path else PurePosixPath(file_path).parts
+    for part in parts:
+        if part.lower().endswith(" county"):
+            return part.replace(" County", "").replace(" county", "").strip()
+    return ""
 
 
 def _format_coordinates(match: SchoolMatch | None) -> str:
@@ -181,8 +196,12 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                 if year_out is None and sample.sample_date is not None:
                     year_out = sample.sample_date.year
 
+                county_out = match.county if match else ""
+                if not county_out:
+                    county_out = _county_from_path(doc.file_path)
+
                 writer.writerow({
-                    "county": match.county if match else "",
+                    "county": county_out,
                     "district": district_out,
                     "school_name": school_name_out,
                     "address": match.address if match else "",
@@ -190,9 +209,12 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                     "sample_id": sample.sample_id or "",
                     "sample_location": sample.location or "",
                     "fixture_type": sample.fixture_type or "",
+                    "draw_type": getattr(sample, "draw_type", "") or "",
                     "sample_date": sample.sample_date.isoformat() if sample.sample_date else "",
                     "year": year_out if year_out is not None else "",
                     "lead_concentration_ppb": m.result_ppb,
+                    "confidence": m.confidence if m.confidence is not None else "",
+                    "source_page": m.source_page if m.source_page is not None else "",
                     "source_file": doc.file_name,
                 })
 

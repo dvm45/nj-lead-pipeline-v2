@@ -1,58 +1,75 @@
 # NJ Lead Pipeline V2
 
-Extracts structured data from NJ school drinking water lead testing PDFs and stores it in a local SQLite database.
-
-Each PDF is read by Claude (Anthropic's LLM) in a single API call. The model returns a structured record that's validated locally before anything is written to the database. Scanned PDFs and unfamiliar lab formats are handled the same way as clean typed reports — the model reads them directly.
+Extracts structured data from NJ school drinking water lead testing PDFs and stores it in a local SQLite database. Each PDF is processed by a multi-agent LLM pipeline that reads reports the way a human analyst would — handling typed text, scanned images, and unfamiliar lab formats alike.
 
 ---
 
 ## What it does
 
 1. **`njlead init`** — creates the database (run once before anything else).
-2. **`njlead ingest <folder>`** — finds every PDF in a folder, sends each one to Claude, and writes the validated results to `leads.db`.
+2. **`njlead ingest <folder>`** — finds every PDF in a folder, runs each through the 3-agent pipeline, and writes validated results to `leads.db`.
 3. **`njlead refresh-reference`** — downloads NCES school metadata (county, address, coordinates) for every NJ public school. Run once before your first export, then yearly.
-4. **`njlead export`** — joins the ingested PDF data with the NCES metadata and writes everything to a CSV file you can open in Excel.
+4. **`njlead export`** — joins the ingested data with NCES metadata and writes a CSV file you can open in Excel.
+
+---
+
+## How the pipeline works
+
+Each PDF goes through three AI agents in sequence:
+
+### Agent 1: Page Classifier (Haiku 4.5)
+Filters out noise pages before extraction — chain-of-custody forms, cover letters, lab boilerplate, appendix dividers. Text pages are classified by keyword heuristics (free, instant). Scanned pages are sent as images to Haiku (~$0.001/page). Data pages pass through; noise pages are dropped.
+
+### Agent 2: Extractor (Opus 4.6)
+Reads the filtered pages and extracts structured data via a tool-use schema. Handles:
+- **Multi-school reports**: district-wide PDFs covering many schools in one file. Per-row school attribution ensures each measurement is assigned to the correct building.
+- **First-draw vs flush**: extracts both draw types as separate measurements when the report distinguishes them.
+- **Scanned pages**: renders pages as images and reads them with vision.
+- **Large reports**: automatically batches reports over 12 text pages or 4 image pages, with adaptive splitting when output nears the token cap.
+
+### Agent 3: Verifier (Sonnet 4.6)
+Cross-checks the extraction against a text digest of the source pages. Focuses on:
+- Multi-school misattribution (the most common error)
+- Value accuracy
+- Completeness (missed measurements)
+- Quality flags (zip codes parsed as ppb, duplicates)
+
+**Cost-optimized**: verification is skipped for high-confidence, single-school, short reports where the extractor is unlikely to have erred. When it does run, it receives a compact text digest — not all source pages as images.
+
+### Validation Gate
+Every extracted measurement must pass 5 rule-based checks before being written to the database:
+1. **Structure** — required fields present
+2. **Range** — physically plausible value (0–50,000 ppb)
+3. **Unit** — recognized unit; independently re-derives ppb from the printed value
+4. **Source-span** — the printed value must actually appear in the page text (anti-hallucination)
+5. **Confidence** — per-row model confidence >= 0.70
+
+Rows that fail any check are logged to the `issues` table for human review — nothing is silently dropped.
 
 ---
 
 ## Setup (Windows)
 
-### Step 1 — Make sure Python 3.11 or newer is installed
-
-Open a terminal (Windows Terminal or Command Prompt) and run:
+### Step 1 — Python 3.11+
 
 ```
 python --version
 ```
 
-You should see `Python 3.11.x` or higher. If not, download Python from [python.org](https://www.python.org/downloads/) and check "Add Python to PATH" during install.
-
----
+If not 3.11 or higher, download from [python.org](https://www.python.org/downloads/) and check "Add Python to PATH" during install.
 
 ### Step 2 — Open a terminal in the project folder
 
 Right-click the `nj_lead_pipeline_v2` folder → "Open in Terminal"
-*(or use `cd` to navigate there)*
 
----
-
-### Step 3 — Create a virtual environment
-
-A virtual environment keeps this project's dependencies separate from other Python projects.
+### Step 3 — Create and activate a virtual environment
 
 ```
 python -m venv .venv
-```
-
-Then activate it:
-
-```
 .venv\Scripts\activate
 ```
 
-Your terminal prompt should change to show `(.venv)` at the start. **You need to do this every time you open a new terminal.**
-
----
+Your prompt should show `(.venv)`. You need to activate this every time you open a new terminal.
 
 ### Step 4 — Install dependencies
 
@@ -61,41 +78,31 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-The first command installs the libraries. The second makes the `njlead` command available.
+### Step 5 — Configure AWS Bedrock credentials
 
----
+The pipeline calls Claude via AWS Bedrock. You need AWS credentials with Bedrock model access:
 
-### Step 5 — Set your Anthropic API key
+```
+aws configure
+```
 
-The pipeline calls the Claude API to read each PDF, so you need an API key.
+Or set environment variables:
+```
+set AWS_ACCESS_KEY_ID=your-key
+set AWS_SECRET_ACCESS_KEY=your-secret
+set AWS_REGION=us-east-2
+```
 
-1. Get a key at [console.anthropic.com](https://console.anthropic.com/) → API Keys.
-2. Copy `.env.example` to `.env`:
-   ```
-   copy .env.example .env
-   ```
-3. Open `.env` in a text editor and paste your key after `ANTHROPIC_API_KEY=`.
-4. Save and close the file.
+**Alternative: Anthropic direct API.** Set `NJLEAD_LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY=sk-ant-...` in a `.env` file.
 
-The `.env` file is gitignored — the key stays on your machine only.
-
----
-
-### Step 6 — Verify installation
+### Step 6 — Verify
 
 ```
 njlead --help
-```
-
-You should see the help text listing `init`, `ingest`, `check-llm`, `refresh-reference`, and `export`.
-
-Then confirm your key is picked up:
-
-```
 njlead check-llm
 ```
 
-This prints a status report without spending anything. You want to see `API key set: yes` and `anthropic SDK installed: yes`.
+`check-llm` confirms credentials and SDK are set up. It makes no API calls and costs nothing.
 
 ---
 
@@ -107,80 +114,33 @@ This prints a status report without spending anything. You want to see `API key 
 njlead init
 ```
 
-This creates `leads.db` in the current folder. You only need to do this once.
-
----
-
 ### Ingest PDFs
 
-Put your PDF files in a folder (e.g. `data/`) and start with a small trial run to check things work before spending real money:
+Start with a small trial run:
 
 ```
 njlead ingest data/ --limit 3
 ```
 
-Then, once you're happy, run the full folder:
+Then run the full folder:
 
 ```
 njlead ingest data/
 ```
 
-For each PDF, the pipeline will:
-- Skip the file if it's already in the database (matched by SHA-256 hash)
-- Extract text from each page with PyMuPDF (kept in the `pages` table for reference)
-- Send the whole report to Claude in one API call
-- Validate every returned measurement (unit check, range check, source-span check, confidence threshold)
-- Write measurements that pass the validation gate; log the rest to the `issues` table as `needs_review`
-
 Output example:
 
 ```
-Ingesting PDFs from: data/
-
-Found 15 PDF file(s) in data/
-  [1/15] report_2019_lincoln.pdf ... ingested
-  [2/15] report_2019_washington.pdf ... ingested
-  [3/15] scan_2018_blurry.pdf ... ingested
+Found 229 PDF file(s) in data/
+  [1/229] Atlantic County report.pdf ... [llm] pages=3 measurements=34
+    [verify] sonnet in=4951 out=347  multi_school=False  confidence=0.97
+  ingested
+  [2/229] Bridgeton BOE Summary.pdf ... [filter] dropped 2 noise page(s)
+    [llm] pages=2 measurements=110  school='Bridgeton Public Schools'
+    [verify] sonnet in=5969 out=543  multi_school=True  attribution_ok=True
+  ingested
   ...
-
-----------------------------------------
-  Total found:  15
-  Ingested:     13
-  Skipped:      1  (already in database)
-  Failed:       1
-----------------------------------------
 ```
-
----
-
-### Refresh NCES reference data (one-time, then yearly)
-
-```
-njlead refresh-reference
-```
-
-The PDFs themselves don't carry county, street address, or GPS coordinates.
-This command downloads two files from the National Center for Education
-Statistics (NCES) and joins them into a local lookup table:
-
-- The CCD School Directory — official school name, district, address, county for every public school in the US.
-- The EDGE Geocodes file — latitude and longitude for each school.
-
-Both files are filtered to New Jersey rows and merged into:
-
-```
-data/reference/nj_schools_<YEAR>.csv
-```
-
-This download is **the only step besides ingest that needs internet**. After it
-completes, `njlead export` works fully offline. Re-run this command once a
-year, or whenever NCES publishes a new school year.
-
-If a download fails because NCES has published a newer file, edit the URL
-constants at the top of `njlead/reference/downloader.py` (instructions in
-that file).
-
----
 
 ### Export to CSV
 
@@ -188,28 +148,31 @@ that file).
 njlead export
 ```
 
-Writes a file like `export_2024-03-15_142301.csv` to the current folder.
-Open it in Excel — each row is one lead measurement, enriched with school
-metadata from NCES.
+Writes `export_<timestamp>.csv` with columns:
 
-Columns: `county`, `district`, `school_name`, `address`, `coordinates`, `sample_id`, `sample_location`, `fixture_type`, `sample_date`, `lead_concentration_ppb`
-
-To write to a specific folder:
-```
-njlead export --output-dir C:\Users\you\Desktop
-```
-
-**About unmatched schools:** if a school name in your PDFs can't be matched
-to NCES (for example, district admin buildings that aren't actual schools),
-the row still ships with the parsed sample data — but `county`, `address`,
-and `coordinates` will be blank. Those schools are listed in
-`data/reference/unmatched_schools.csv` so you can review them manually.
+| Column | Source |
+|---|---|
+| `county` | NCES metadata |
+| `district` | NCES canonical name (falls back to PDF) |
+| `school_name` | NCES canonical name (falls back to PDF) |
+| `address` | NCES metadata |
+| `coordinates` | NCES lat/long |
+| `sample_id` | Extracted from PDF |
+| `sample_location` | Extracted from PDF |
+| `fixture_type` | Extracted from PDF (e.g. "Sink", "Water Cooler") |
+| `draw_type` | `first_draw`, `flush`, or blank |
+| `sample_date` | Extracted from PDF, ISO format |
+| `year` | Year from date or report |
+| `lead_concentration_ppb` | Lead result in ppb |
+| `confidence` | Model's per-row confidence (0–1) |
+| `source_page` | Page number in the source PDF |
+| `source_file` | PDF filename |
 
 ---
 
 ## Debugging tools
 
-These are Claude Code slash commands — type them in the Claude Code chat:
+Claude Code slash commands for inspecting the database:
 
 | Command | What it shows |
 |---|---|
@@ -221,27 +184,46 @@ These are Claude Code slash commands — type them in the Claude Code chat:
 
 ## Understanding extraction issues
 
-The pipeline never crashes on a bad file — it logs problems to the `issues` table and moves on. Common issue types:
+The pipeline logs problems to the `issues` table instead of crashing:
 
 | Issue type | What it means |
 |---|---|
-| `needs_review` | A row failed the validation gate (bad unit, out-of-range value, low confidence, or the value couldn't be found in the source text). Included row + the specific reasons. |
-| `no_school_found` | The model didn't return a school name for this report. |
-| `no_measurements` | The model returned zero measurements — the file may be a cover letter, notification, or otherwise not a results report. |
-| `llm_error` | The API call or response parsing failed. Usually transient — try again. |
-| `extraction_failed` | PDF couldn't be opened (corrupt, password-protected, wrong format). |
-
-Use `/show-sample <filename> <page>` to see exactly what text was extracted from a problem page — helpful when a `needs_review` reason says the value couldn't be located in the source.
+| `needs_review` | Row failed validation (bad unit, out-of-range, low confidence, or value not found in source text) |
+| `verification` | Sonnet verifier flagged something (wrong school attribution, missed measurements, value discrepancy) |
+| `no_school_found` | Model didn't return a school name |
+| `no_measurements` | Model returned zero measurements (file may be a cover letter) |
+| `llm_error` | API call or response parsing failed |
+| `extraction_failed` | PDF couldn't be opened |
 
 ---
 
 ## Cost
 
-- Roughly **pennies per report** on Claude Sonnet.
-- A full statewide run (~800 reports) is on the order of tens of dollars, one-time.
-- The SHA-256 dedup at the top of ingest means re-running the same folder does not re-spend on files already in the database.
+The pipeline uses three Claude models at different price points:
 
-Use `--limit N` for a small trial run before committing to a big folder.
+| Agent | Model | Typical cost per report |
+|---|---|---|
+| Classifier | Haiku 4.5 | ~$0.001/scanned page (text pages are free) |
+| Extractor | Opus 4.6 | ~$0.05–0.50 depending on page count |
+| Verifier | Sonnet 4.6 | ~$0.01–0.05 (skipped for simple reports) |
+
+Prompt caching reduces repeated system prompt costs by ~90% within a batch run. SHA-256 dedup means re-running the same folder doesn't re-spend on files already in the database.
+
+Use `--limit N` for a trial run before committing to a large folder.
+
+---
+
+## Tuning
+
+Settings in `.env` (all optional — safe defaults are used):
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `NJLEAD_LLM_PROVIDER` | `bedrock` | `bedrock` or `anthropic` |
+| `NJLEAD_BEDROCK_MODEL_ID` | `us.anthropic.claude-opus-4-6-v1` | Bedrock model for extraction |
+| `NJLEAD_LLM_MAX_TOKENS` | `16384` | Max response size (tokens) |
+| `NJLEAD_CONFIDENCE_THRESHOLD` | `0.70` | Rows below this go to `needs_review` |
+| `NJLEAD_SCAN_DPI` | `150` | Resolution for rendering scanned pages |
 
 ---
 
@@ -249,48 +231,32 @@ Use `--limit N` for a small trial run before committing to a big folder.
 
 ```
 nj_lead_pipeline_v2/
-├── requirements.txt         ← Python dependencies
-├── pyproject.toml           ← makes `njlead` a CLI command
-├── .env.example             ← template for ANTHROPIC_API_KEY (copy to .env)
+├── requirements.txt
+├── pyproject.toml              <- makes `njlead` a CLI command
+├── .env.example                <- credential template (copy to .env)
 ├── njlead/
-│   ├── cli.py               ← init, ingest, check-llm, refresh-reference, export
-│   ├── config.py            ← reads ANTHROPIC_API_KEY and model settings from .env
+│   ├── cli.py                  <- Typer CLI: init, ingest, check-llm, export
+│   ├── config.py               <- env/.env settings (provider, model, thresholds)
 │   ├── db/
-│   │   ├── models.py        ← database table definitions
-│   │   └── session.py       ← database connection
+│   │   ├── models.py           <- SQLAlchemy ORM (6 tables)
+│   │   └── session.py          <- engine + Session factory
 │   ├── ingest/
-│   │   ├── extractor.py     ← PDF text extraction (PyMuPDF)
-│   │   ├── schema.py        ← the "blank form" the model fills in (Pydantic)
-│   │   ├── validation.py    ← QA/QC gate — every row must clear this to be stored
-│   │   ├── llm_extractor.py ← one Claude API call per report
-│   │   ├── llm_pipeline.py  ← extract → validate → write for one report
-│   │   └── loader.py        ← folder walk + orchestration
-│   ├── reference/           ← NCES school metadata enrichment
-│   │   ├── downloader.py    ← fetches CCD + EDGE files from nces.ed.gov
-│   │   └── matcher.py       ← fuzzy-matches PDF school names to NCES records
+│   │   ├── loader.py           <- folder walk + per-file orchestration
+│   │   ├── extractor.py        <- PyMuPDF text extraction, page-by-page
+│   │   ├── page_classifier.py  <- Agent 1: Haiku page classifier
+│   │   ├── schema.py           <- Pydantic extraction schema (the "blank form")
+│   │   ├── llm_extractor.py    <- Agent 2: Opus extraction client
+│   │   ├── verifier.py         <- Agent 3: Sonnet verification agent
+│   │   ├── validation.py       <- Rule-based QA/QC gate (5 checks)
+│   │   └── llm_pipeline.py     <- orchestrates classify -> extract -> verify -> validate -> write
+│   ├── reference/
+│   │   ├── downloader.py       <- fetches NCES CCD + EDGE files
+│   │   └── matcher.py          <- fuzzy school-name matcher (rapidfuzz)
 │   └── export/
-│       └── writer.py        ← CSV export (with NCES join)
+│       └── writer.py           <- CSV export with NCES join
 └── data/
-    ├── (put your PDFs here)
-    └── reference/           ← cached NCES files (created by refresh-reference)
-        ├── nj_schools_<YEAR>.csv      ← unified lookup
-        └── unmatched_schools.csv      ← schools that didn't match NCES
+    ├── (your PDFs here)
+    └── reference/              <- cached NCES files
+        ├── nj_schools_<YEAR>.csv
+        └── unmatched_schools.csv
 ```
-
----
-
-## Tuning the extraction
-
-The behavior of the ingest pipeline is controlled by a handful of settings in
-`.env` (all optional — safe defaults are used if they're not set):
-
-| Setting | Default | Purpose |
-|---|---|---|
-| `NJLEAD_LLM_MODEL` | `claude-sonnet-4-6` | Which Claude model to call |
-| `NJLEAD_LLM_MAX_TOKENS` | `4096` | Max size of the model's response |
-| `NJLEAD_CONFIDENCE_THRESHOLD` | `0.70` | Rows below this per-row confidence go to `needs_review` instead of being written |
-| `NJLEAD_SCAN_DPI` | `150` | Resolution for rendering scanned pages to images before sending them to the model |
-
-Raise the threshold to be stricter (more rows held for review, fewer written).
-Lower it to trust the model more. Every held row is preserved in the `issues`
-table with the reasons, so nothing is silently dropped either way.

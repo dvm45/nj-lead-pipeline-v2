@@ -52,28 +52,22 @@ LLM_PROVIDER: str = os.environ.get("NJLEAD_LLM_PROVIDER", "bedrock").strip().low
 ANTHROPIC_API_KEY: str | None = os.environ.get("ANTHROPIC_API_KEY")
 
 # Model ID for Anthropic's direct API (their naming, not AWS's).
-ANTHROPIC_MODEL: str = os.environ.get("NJLEAD_ANTHROPIC_MODEL", "claude-sonnet-4-5")
+ANTHROPIC_MODEL: str = os.environ.get("NJLEAD_ANTHROPIC_MODEL", "claude-opus-4-6")
 
 
 # ---------------------------------------------------------------------------
 # Bedrock settings (only used when LLM_PROVIDER == "bedrock")
 # ---------------------------------------------------------------------------
 
-# AWS region where you've been granted Bedrock model access. Sonnet 4.5 is
-# widely available in us-east-1, us-east-2, and us-west-2.
+# AWS region where you've been granted Bedrock model access.
 AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-2")
 
-# Bedrock's ID for Claude Sonnet 4.5 (which Anthropic calls Sonnet 4.6 on
-# their direct API - AWS keeps the original release name).
-#
-# The "us." prefix means "US inference profile" - Bedrock routes the call
-# across US regions for capacity. Using the raw model ID without a prefix
-# will fail in most regions with "on-demand throughput isn't supported for
-# this model in this region." If you ever need a different region prefix
-# (eg "eu."), override this via NJLEAD_BEDROCK_MODEL_ID in .env.
+# Bedrock's ID for Claude Opus 4.6. The "us." prefix means "US inference
+# profile" — Bedrock routes across US regions for capacity. Override via
+# NJLEAD_BEDROCK_MODEL_ID in .env if needed.
 BEDROCK_MODEL_ID: str = os.environ.get(
     "NJLEAD_BEDROCK_MODEL_ID",
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "us.anthropic.claude-opus-4-6-v1",  # cross-region inference profile
 )
 
 
@@ -81,15 +75,11 @@ BEDROCK_MODEL_ID: str = os.environ.get(
 # Provider-neutral model settings
 # ---------------------------------------------------------------------------
 
-# Ceiling on the model's response size (tokens). 16384 is Sonnet 4.5's
-# maximum for a synchronous (non-streaming) call - going higher forces the
-# SDK to require streaming, which the pipeline doesn't currently do.
-#
-# The schema is tuned (short source_text, tight per-row fields) so that even
-# 100+ fixture reports fit comfortably under this cap. If a report ever does
-# get truncated (stop_reason=max_tokens), the model returns an empty
-# measurements list rather than a partial one - the [llm] status line in the
-# ingest output will flag it as TRUNCATED so the file can be reviewed.
+# Ceiling on the model's response size (tokens). Opus supports up to 32768
+# for synchronous calls. The schema is tuned so even large reports fit
+# comfortably. If a report gets truncated (stop_reason=max_tokens), the
+# model returns an empty measurements list — the ingest output flags it as
+# TRUNCATED for review.
 LLM_MAX_TOKENS: int = int(os.environ.get("NJLEAD_LLM_MAX_TOKENS", "16384"))
 
 # Rows the model reports below this confidence are sent to human review

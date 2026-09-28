@@ -174,10 +174,9 @@ class Sample(Base):
     # This is the original, untouched string from the report — we never lose info.
     location: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # The fixture portion of the location, split off by a keyword heuristic
-    # (e.g. "Water Chiller", "Bottle Filler", "Sink Faucet"). May be null if
-    # no known fixture keyword appeared in the location string.
     fixture_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    draw_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # Full date if available (e.g. 2019-05-14)
     sample_date: Mapped[date | None] = mapped_column(nullable=True)

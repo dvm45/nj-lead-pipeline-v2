@@ -21,6 +21,7 @@ everything up and add credentials later.
 from __future__ import annotations
 
 import base64
+import re
 from pathlib import Path
 
 import fitz  # PyMuPDF - used only to rasterize scanned pages
@@ -37,28 +38,93 @@ _SYSTEM_PROMPT = (
     "any of many different labs. Read it the way a careful analyst would and call "
     "the record_lead_report tool exactly once to return the data in the required "
     "form.\n\n"
-    "Rules:\n"
-    "- Fill only what the report actually states. Use null for anything missing; "
-    "never guess.\n"
+
+    "## MULTI-SCHOOL REPORTS (CRITICAL)\n"
+    "Many NJ reports are DISTRICT-WIDE — one PDF covering multiple schools or "
+    "buildings. These appear as:\n"
+    "  - Section headers: 'Admin Building', 'Excel Bldg', 'West Ave School'\n"
+    "  - A 'Building' or 'School' column in a flat table that changes value mid-page\n"
+    "  - Separate lab result pages per school, with the school name in the page header\n\n"
+    "When a report covers multiple schools, you MUST set the per-row school_name "
+    "on EVERY measurement to the specific school/building it belongs to. The "
+    "report-level school_name should be the district or the first school listed. "
+    "NEVER leave per-row school_name null on a multi-school report — that assigns "
+    "all data to a single school, which is WRONG.\n\n"
+    "Example: A Bridgeton BOE summary has sections for 'Admin Building', 'Excel Bldg', "
+    "'West Ave School'. A sink in Excel Bldg should have school_name='Excel Building' "
+    "on that measurement row, NOT null.\n\n"
+
+    "## FIRST-DRAW vs FLUSH SAMPLES\n"
+    "Many NJ reports have two columns per fixture: 'First Draw' (stagnant water) "
+    "and '30-sec Flush' (after running). Extract BOTH as separate measurements. "
+    "Set draw_type='first_draw' or draw_type='flush' accordingly. If the report "
+    "doesn't distinguish draw types, leave draw_type null.\n\n"
+
+    "## VALUE EXTRACTION RULES\n"
+    "- Fill only what the report states. Use null for anything missing; never guess.\n"
     "- Capture every water sample that has a lead result, including non-detects.\n"
-    "- result_ppb must be the lead value in ppb (= ug/L). 'ND' / 'None Detected' "
-    "-> 0.0; '<1.00' -> the detection limit (1.0). Put the value exactly as "
-    "printed in result_raw, and the printed unit in unit_raw.\n"
-    "- source_text: a SHORT verbatim snippet (under 160 chars) - typically the "
-    "location plus the result value, e.g. 'Water Cooler, 3rd Floor Hall Left  "
-    "4.05'. Do NOT quote the whole row or the whole line if the row is long. "
-    "This is an anti-hallucination check, not a display field.\n"
-    "- lab_name is the lab/vendor on the letterhead (e.g. EMSL, LEW, RAMM); it is "
-    "just a field, not something you route on.\n"
-    "- confidence is your own 0-1 confidence in each row.\n"
-    "- Always fill school_name and district when the report identifies them - "
-    "these are usually on the cover page or in a header.\n"
-    "- Some PDFs are DISTRICT-WIDE reports covering many schools in one file. "
-    "When rows come from a school DIFFERENT from the report header, set the "
-    "per-row school_name (and district if it differs) on that measurement. "
-    "For single-school reports, leave the per-row school_name / district null "
-    "- the report-level fields apply to every row."
+    "- result_ppb = lead value in ppb (= ug/L). 'ND'/'None Detected' -> 0.0; "
+    "'<1.00' -> the detection limit (1.0). Put the value exactly as printed in "
+    "result_raw, and the printed unit in unit_raw.\n"
+    "- source_text: a SHORT verbatim snippet (under 160 chars) — the location "
+    "plus the result value. Anti-hallucination check, not a display field.\n"
+    "- confidence: your 0-1 confidence in each row.\n\n"
+
+    "## METADATA RULES\n"
+    "- ALWAYS fill the report-level school_name and district.\n"
+    "- school_name: Use the FULL name ('Public School No. 10' not 'PS10').\n"
+    "- district: The school district (e.g. 'Paterson Public Schools'). Often the "
+    "city/township name or the 'client' on the letterhead.\n"
+    "- lab_name: The lab/vendor on the letterhead (e.g. EMSL, LEW, RAMM).\n"
+    "- fixture_type: Separate from location (e.g. 'Sink', 'Water Cooler', "
+    "'Bubbler'). ALWAYS fill this when the report names the fixture.\n"
+    "- In NJ, 'PS #10' / 'P.S. 10' / 'School 10' / 'Public School No. 10' are "
+    "the same school. Always use the FULL form."
 )
+
+
+# ---------------------------------------------------------------------------
+# Folder-path metadata extraction
+# ---------------------------------------------------------------------------
+
+_STRIP_SUFFIX_RE = re.compile(
+    r"\s*[-–]\s*("
+    r"\d{2,4}[-–]\d{2,4}\s*parsed"
+    r"|fully\s*parsed"
+    r"|parsed"
+    r")",
+    re.IGNORECASE,
+)
+
+_KNOWN_LABS = {
+    "emsl", "lew", "ramm", "apl", "pas", "rk", "whitman", "york",
+    "new wave", "deblock-apl", "deblock",
+}
+
+
+def parse_folder_hints(pdf_path: Path) -> dict:
+    """
+    Extract county, district, and lab hints from the folder hierarchy.
+
+    Convention:  data/<County> County/<District - ...>/.../file.pdf
+    Returns a dict with keys county, district, lab (any may be empty string).
+    """
+    hints: dict = {"county": "", "district": "", "lab": ""}
+    parts = pdf_path.resolve().parts
+
+    for i, part in enumerate(parts):
+        lower = part.lower()
+        if lower.endswith(" county") and lower != "county":
+            hints["county"] = part.replace(" County", "").replace(" county", "").strip()
+            if i + 1 < len(parts):
+                raw_district = parts[i + 1]
+                hints["district"] = _STRIP_SUFFIX_RE.sub("", raw_district).strip()
+        if lower.replace("-", "").replace(" ", "") in {
+            l.replace(" ", "") for l in _KNOWN_LABS
+        }:
+            hints["lab"] = part.strip()
+
+    return hints
 
 
 class LLMConfigError(RuntimeError):
@@ -85,16 +151,53 @@ def _page_image_block(pdf_path: Path, page_num: int) -> dict:
     }
 
 
-def _build_content(pages: list[dict], pdf_path: Path) -> list[dict]:
+def _build_content(
+    pages: list[dict],
+    pdf_path: Path,
+    folder_hints: dict | None = None,
+    context_header: dict | None = None,
+) -> list[dict]:
     """
     Build the user message content from a report's pages.
 
     `pages` is a list of dicts: {page_num, raw_text, is_blank}. Text pages are
     sent as text; blank (scanned) pages are rasterized and sent as images.
+    `folder_hints` — county/district/lab from the folder path (optional).
+    `context_header` — school/district/lab from a prior batch (optional).
     """
     content: list[dict] = [
         {"type": "text", "text": "Here is one lead-testing report. Extract all results."}
     ]
+
+    if folder_hints and any(folder_hints.get(k) for k in ("county", "district", "lab")):
+        hint_lines = []
+        for k in ("county", "district", "lab"):
+            v = folder_hints.get(k, "")
+            if v:
+                hint_lines.append(f"  {k.title()}: {v}")
+        content.append({
+            "type": "text",
+            "text": (
+                "File context from folder structure (use as hints, but prefer "
+                "what the document itself states):\n" + "\n".join(hint_lines)
+            ),
+        })
+
+    if context_header and any(context_header.get(k) for k in ("school_name", "district", "lab_name")):
+        ctx_lines = []
+        for k, label in [("school_name", "School"), ("district", "District"), ("lab_name", "Lab")]:
+            v = context_header.get(k, "")
+            if v:
+                ctx_lines.append(f"  {label}: {v}")
+        content.append({
+            "type": "text",
+            "text": (
+                "This is a continuation of a multi-page report. "
+                "The earlier pages identified:\n" + "\n".join(ctx_lines) + "\n"
+                "Use these for all rows unless this page explicitly names a different school."
+            ),
+        })
+
     for pg in pages:
         n = pg["page_num"]
         if pg.get("is_blank") or not (pg.get("raw_text") or "").strip():
@@ -186,6 +289,8 @@ def _summarize_response(pages_batch: list[dict], message, label: str) -> tuple[i
     truncated = stop_reason == "max_tokens"
     in_tokens = message.usage.input_tokens
     out_tokens = message.usage.output_tokens
+    cache_read = getattr(message.usage, "cache_read_input_tokens", 0) or 0
+    cache_create = getattr(message.usage, "cache_creation_input_tokens", 0) or 0
     tool_input: dict = {}
     tool_present = False
     for block in message.content:
@@ -205,10 +310,16 @@ def _summarize_response(pages_batch: list[dict], message, label: str) -> tuple[i
         flags.append("NO_TOOL_CALL (model did not use the structured tool)")
     flag_str = f"  {' | '.join(flags)}" if flags else ""
 
+    cache_str = ""
+    if cache_read:
+        cache_str = f"  cache_read={cache_read}"
+    elif cache_create:
+        cache_str = f"  cache_write={cache_create}"
+
     print(
         f"    [llm]{label} "
         f"pages={len(pages_batch)} (text={pages_text}, image={pages_image})  "
-        f"stop={stop_reason}  in={in_tokens} out={out_tokens}  "
+        f"stop={stop_reason}  in={in_tokens} out={out_tokens}{cache_str}  "
         f"measurements={meas}  "
         f"school={tool_input.get('school_name')!r}  lab={tool_input.get('lab_name')!r}"
         + flag_str,
@@ -217,15 +328,39 @@ def _summarize_response(pages_batch: list[dict], message, label: str) -> tuple[i
     return meas, truncated, empty, tool_input, out_tokens
 
 
-def _call_once(client, model_id: str, tool: dict, pages_batch: list[dict], pdf_path: Path) -> "tuple[dict, object]":
+def _call_once(
+    client,
+    model_id: str,
+    tool: dict,
+    pages_batch: list[dict],
+    pdf_path: Path,
+    folder_hints: dict | None = None,
+    context_header: dict | None = None,
+) -> "tuple[dict, object]":
     """One raw API call for a page batch. Returns (tool_input_dict, message)."""
+    system_blocks = [
+        {
+            "type": "text",
+            "text": _SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    cached_tool = dict(tool)
+    cached_tool["cache_control"] = {"type": "ephemeral"}
     message = client.messages.create(
         model=model_id,
         max_tokens=config.LLM_MAX_TOKENS,
-        system=_SYSTEM_PROMPT,
-        tools=[tool],
+        system=system_blocks,
+        tools=[cached_tool],
         tool_choice={"type": "tool", "name": _TOOL_NAME},
-        messages=[{"role": "user", "content": _build_content(pages_batch, pdf_path)}],
+        messages=[{
+            "role": "user",
+            "content": _build_content(
+                pages_batch, pdf_path,
+                folder_hints=folder_hints,
+                context_header=context_header,
+            ),
+        }],
     )
     return message
 
@@ -273,6 +408,8 @@ def extract_report(pages: list[dict], pdf_path: Path) -> ExtractedReport:
         "input_schema": ExtractedReport.model_json_schema(),
     }
 
+    folder_hints = parse_folder_hints(pdf_path)
+
     # Queue of pending page batches. We pop from the front and may push
     # smaller sub-batches back when adaptive shrinking kicks in — see below.
     from collections import deque
@@ -283,9 +420,13 @@ def extract_report(pages: list[dict], pdf_path: Path) -> ExtractedReport:
     batch_num = 0
     near_cap_threshold = int(config.LLM_MAX_TOKENS * 0.85)
 
-    def run_batch(batch: list[dict], label: str) -> tuple[dict, int]:
+    def run_batch(batch: list[dict], label: str, ctx: dict | None = None) -> tuple[dict, int]:
         try:
-            message = _call_once(client, model_id, tool, batch, pdf_path)
+            message = _call_once(
+                client, model_id, tool, batch, pdf_path,
+                folder_hints=folder_hints,
+                context_header=ctx,
+            )
         except Exception as e:
             raise LLMExtractionError(f"API call failed: {e}") from e
         _, truncated, empty, tool_input, out_tokens = _summarize_response(batch, message, label)
@@ -293,8 +434,8 @@ def extract_report(pages: list[dict], pdf_path: Path) -> ExtractedReport:
         if truncated and empty and len(batch) > 1:
             mid = len(batch) // 2
             print(f"    [llm]{label} retrying as 2 sub-batches of {mid} and {len(batch)-mid} pages", flush=True)
-            left_input, left_out = run_batch(batch[:mid], label + ".a")
-            right_input, right_out = run_batch(batch[mid:], label + ".b")
+            left_input, left_out = run_batch(batch[:mid], label + ".a", ctx=ctx)
+            right_input, right_out = run_batch(batch[mid:], label + ".b", ctx=ctx)
             merged = dict(left_input)
             merged["measurements"] = list(left_input.get("measurements") or []) + list(right_input.get("measurements") or [])
             for k in ("school_name", "district", "lab_name"):
@@ -314,7 +455,8 @@ def extract_report(pages: list[dict], pdf_path: Path) -> ExtractedReport:
         batch = queue.popleft()
         batch_num += 1
         label = f" [batch {batch_num}]" if initial_batches > 1 or batch_num > 1 else ""
-        result, out_tokens = run_batch(batch, label)
+        batch_ctx = header if batch_num > 1 and header else None
+        result, out_tokens = run_batch(batch, label, ctx=batch_ctx)
         for k in ("school_name", "district", "lab_name"):
             if not header.get(k) and result.get(k):
                 header[k] = result[k]

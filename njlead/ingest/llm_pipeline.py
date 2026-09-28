@@ -23,6 +23,28 @@ from sqlalchemy.orm import Session
 
 from njlead.db.models import Document, Issue, Measurement, Sample, School
 
+import logging
+import re
+
+from rapidfuzz import fuzz
+
+_log = logging.getLogger(__name__)
+
+_SCHOOL_NUM_RE = re.compile(r"\bp\.?\s*s\.?\s*#?\s*(\d{1,3})\b", re.IGNORECASE)
+_SCHOOL_NUM_RE2 = re.compile(r"\bschool\s*(?:no\.?\s*)?#?\s*(\d{1,3})\b", re.IGNORECASE)
+
+def _school_number(name: str | None) -> int | None:
+    if not name:
+        return None
+    for pat in (_SCHOOL_NUM_RE, _SCHOOL_NUM_RE2):
+        m = pat.search(name)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                continue
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Small DB-write helpers, shared with loader.py
@@ -40,12 +62,9 @@ def get_or_create_school(
     if not name and not district:
         return None
 
-    # The schools table requires a name — if we only have a district,
-    # skip creating the school row rather than crashing.
     if not name:
         return None
 
-    # Normalize: strip whitespace, title-case for consistent de-dup
     name = name.strip().title() if name else None
     district = district.strip().title() if district else None
 
@@ -57,9 +76,35 @@ def get_or_create_school(
     if existing:
         return existing
 
+    # Fuzzy dedup: before creating a new row, check if a similar school
+    # already exists in the same district.
+    if district:
+        same_district = session.query(School).filter(School.district == district).all()
+    else:
+        same_district = session.query(School).filter(School.district.is_(None)).all()
+
+    input_num = _school_number(name)
+    best_match: School | None = None
+    best_score = 0.0
+
+    for candidate in same_district:
+        cand_num = _school_number(candidate.name)
+        # Same school number = identity match (e.g. "PS #10" and "Public School No. 10")
+        if input_num is not None and cand_num is not None and input_num == cand_num:
+            _log.info("Fuzzy dedup (number match): '%s' → existing '%s' (district=%s)", name, candidate.name, district)
+            return candidate
+        score = fuzz.WRatio(name or "", candidate.name or "")
+        if score > best_score:
+            best_score = score
+            best_match = candidate
+
+    if best_match is not None and best_score >= 88:
+        _log.info("Fuzzy dedup (score=%.1f): '%s' → existing '%s' (district=%s)", best_score, name, best_match.name, district)
+        return best_match
+
     school = School(name=name, district=district, state="NJ")
     session.add(school)
-    session.flush()  # assigns school.id without committing the full transaction
+    session.flush()
     return school
 
 
@@ -99,8 +144,9 @@ def ingest_report_llm(
     # Lazy import keeps the anthropic SDK optional at import time — the CLI's
     # check-llm command can still tell the user the SDK is missing even when
     # this module gets imported.
-    from njlead.ingest.llm_extractor import extract_report, LLMExtractionError
+    from njlead.ingest.llm_extractor import extract_report, LLMExtractionError, parse_folder_hints
     from njlead.ingest.validation import validate_report
+    from njlead.ingest.verifier import verify_report, apply_verification, should_verify
 
     # extract_report may raise LLMConfigError (propagate) or LLMExtractionError.
     try:
@@ -108,6 +154,24 @@ def ingest_report_llm(
     except LLMExtractionError as e:
         log_issue(session, doc, "llm_error", str(e))
         return 0, True
+
+    # Fall back to folder-path hints when the LLM didn't return a district.
+    hints = parse_folder_hints(pdf_path)
+    if not report.district and hints.get("district"):
+        report.district = hints["district"]
+    if not report.school_name and hints.get("school_name"):
+        report.school_name = hints["school_name"]
+
+    # --- Sonnet verification pass ---
+    # Conditional: skip verification for high-confidence, single-school,
+    # short reports where the extractor is unlikely to have made errors.
+    # Always verify multi-school reports and large/low-confidence ones.
+    if report.measurements and should_verify(report, pages):
+        findings = verify_report(report, pages, pdf_path)
+        if findings is not None:
+            report, verify_issues = apply_verification(report, findings)
+            for vi in verify_issues:
+                log_issue(session, doc, "verification", vi)
 
     # Source-span verification needs extracted text. Skip it whenever ANY page
     # in this report was sent as an image (is_blank=True): the model may have
@@ -159,6 +223,7 @@ def ingest_report_llm(
             sample_id=m.sample_id,
             location=m.sample_location,
             fixture_type=m.fixture_type,
+            draw_type=getattr(m, "draw_type", None),
             sample_date=m.sample_date,
             test_year=m.test_year,
         )

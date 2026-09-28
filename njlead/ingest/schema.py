@@ -53,17 +53,17 @@ class ExtractedMeasurement(BaseModel):
         default=None,
         description="The fixture, separated from the location (e.g. 'Water Chiller Fountain', 'Bottle Filler', 'Sink'). Null if none named.",
     )
-    # District-wide "consolidated" PDFs (one file, many schools) — fill these
-    # per row so multi-school reports aren't misfiled under a single school.
-    # For single-school reports, leave both null; the report-level school_name /
-    # district apply to every row.
+    draw_type: str | None = Field(
+        default=None,
+        description="Sample draw type: 'first_draw', 'flush', or null if unknown. Many NJ reports have separate columns for first-draw and 30-second flush results — extract BOTH as separate measurements with this field distinguishing them.",
+    )
     school_name: str | None = Field(
         default=None,
-        description="School for THIS specific sample, ONLY when the report covers multiple schools and this row belongs to a school different from the report header. Leave null for single-school reports.",
+        description="REQUIRED for multi-school reports: the school/building this specific sample belongs to. Many NJ reports cover an entire district — data tables are grouped under school/building headings like 'Admin Building', 'Excel Bldg', 'PS No. 10'. Set this on EVERY row when the report contains more than one school. Leave null ONLY for single-school reports.",
     )
     district: str | None = Field(
         default=None,
-        description="District for THIS specific sample, only when it differs from the report header. Leave null when unknown or same as the report header.",
+        description="District for THIS specific sample, only when it differs from the report header. Leave null when same as the report header.",
     )
 
     analyte: str = Field(default="lead", description="What was measured; almost always 'lead'.")
