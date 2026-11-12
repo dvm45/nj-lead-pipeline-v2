@@ -21,6 +21,7 @@ everything up and add credentials later.
 from __future__ import annotations
 
 import base64
+import logging
 import re
 from pathlib import Path
 
@@ -28,6 +29,8 @@ import fitz  # PyMuPDF - used only to rasterize scanned pages
 
 from njlead import config
 from njlead.ingest.schema import ExtractedReport
+
+_log = logging.getLogger(__name__)
 
 # Name of the structured-output tool we force the model to call.
 _TOOL_NAME = "record_lead_report"
@@ -322,14 +325,13 @@ def _summarize_response(pages_batch: list[dict], message, label: str) -> tuple[i
     elif cache_create:
         cache_str = f"  cache_write={cache_create}"
 
-    print(
-        f"    [llm]{label} "
-        f"pages={len(pages_batch)} (text={pages_text}, image={pages_image})  "
-        f"stop={stop_reason}  in={in_tokens} out={out_tokens}{cache_str}  "
-        f"measurements={meas}  "
-        f"school={tool_input.get('school_name')!r}  lab={tool_input.get('lab_name')!r}"
-        + flag_str,
-        flush=True,
+    _log.info(
+        "[llm]%s pages=%d (text=%d, image=%d)  stop=%s  in=%d out=%d%s  "
+        "measurements=%d  school=%r  lab=%r%s",
+        label, len(pages_batch), pages_text, pages_image,
+        stop_reason, in_tokens, out_tokens, cache_str,
+        meas, tool_input.get("school_name"), tool_input.get("lab_name"),
+        flag_str,
     )
     return meas, truncated, empty, tool_input, out_tokens
 
@@ -439,7 +441,7 @@ def extract_report(pages: list[dict], pdf_path: Path) -> ExtractedReport:
         # Retry once with a smaller batch if we truncated to nothing.
         if truncated and empty and len(batch) > 1:
             mid = len(batch) // 2
-            print(f"    [llm]{label} retrying as 2 sub-batches of {mid} and {len(batch)-mid} pages", flush=True)
+            _log.info("[llm]%s retrying as 2 sub-batches of %d and %d pages", label, mid, len(batch) - mid)
             left_input, left_out = run_batch(batch[:mid], label + ".a", ctx=ctx)
             right_input, right_out = run_batch(batch[mid:], label + ".b", ctx=ctx)
             merged = dict(left_input)
@@ -485,16 +487,15 @@ def extract_report(pages: list[dict], pdf_path: Path) -> ExtractedReport:
                 mid = len(nxt) // 2
                 queue.appendleft(nxt[mid:])
                 queue.appendleft(nxt[:mid])
-                print(
-                    f"    [llm]{label} out={out_tokens} near cap "
-                    f"({near_cap_threshold}); shrinking next batch to {mid} pages",
-                    flush=True,
+                _log.info(
+                    "[llm]%s out=%d near cap (%d); shrinking next batch to %d pages",
+                    label, out_tokens, near_cap_threshold, mid,
                 )
             else:
                 queue.appendleft(nxt)
 
     if batch_num > 1:
-        print(f"    [llm] merged {batch_num} batches -> {len(all_measurements)} total measurements", flush=True)
+        _log.info("[llm] merged %d batches -> %d total measurements", batch_num, len(all_measurements))
 
     merged_payload = {**header, "measurements": all_measurements}
     try:

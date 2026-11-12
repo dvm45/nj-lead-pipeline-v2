@@ -16,6 +16,7 @@ caller aborts the run with setup instructions.
 """
 
 import hashlib
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from sqlalchemy.orm import Session
 from njlead.db.models import Document, Page
 from njlead.db.session import get_session
 from njlead.ingest.extractor import extract_pdf
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +122,7 @@ def _ingest_one(session: Session, path: Path) -> str:
     from njlead.ingest.page_classifier import filter_noise_pages
     pages_payload, dropped = filter_noise_pages(pages_payload, pdf_path=path)
     if dropped:
-        print(f"[filter] dropped {dropped} noise page(s)", end=" ", flush=True)
+        _log.info("[filter] dropped %d noise page(s) from %s", dropped, path.name)
 
     # LLMConfigError (missing key / SDK) is deliberately NOT caught here — it
     # would repeat on every file, so it propagates and the caller aborts the
@@ -179,33 +182,30 @@ def ingest_folder(folder: Path, limit: int | None = None) -> dict[str, int]:
 
     total = len(unique_pdfs)
     if total == 0:
-        print(f"No PDF files found in {folder}")
+        _log.warning("No PDF files found in %s", folder)
         return {**counts, "total": 0}
 
-    print(f"Found {total} PDF file(s) in {folder}")
+    _log.info("Found %d PDF file(s) in %s", total, folder)
 
     # Import LLMConfigError lazily so this module doesn't require the anthropic
     # SDK to even be importable — the CLI's `check-llm` still works without it.
     from njlead.ingest.llm_extractor import LLMConfigError
 
     for i, pdf_path in enumerate(unique_pdfs, start=1):
-        print(f"  [{i}/{total}] {pdf_path.name} ...", end=" ", flush=True)
+        _log.info("[%d/%d] %s ...", i, total, pdf_path.name)
         try:
             with get_session() as session:
                 result = _ingest_one(session, pdf_path)
         except LLMConfigError:
-            # Missing key / missing SDK — no file will succeed. Re-raise so the
-            # CLI can print a friendly setup message and exit non-zero.
-            print("ABORT")
+            _log.error("ABORT — missing LLM credentials")
             raise
         except Exception as e:
-            # Catch-all: something unexpected happened outside _ingest_one
-            print(f"ERROR: {e}")
+            _log.error("[%d/%d] %s ERROR: %s", i, total, pdf_path.name, e)
             counts["failed"] += 1
             continue
 
         counts[result] += 1
-        print(result)
+        _log.info("[%d/%d] %s %s", i, total, pdf_path.name, result)
 
     counts["total"] = total
     return counts

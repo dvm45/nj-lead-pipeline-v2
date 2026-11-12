@@ -25,6 +25,13 @@ app = typer.Typer(
 )
 
 
+@app.callback()
+def _startup() -> None:
+    """Initialize logging before any command runs."""
+    from njlead.logging_setup import setup_logging
+    setup_logging()
+
+
 # ---------------------------------------------------------------------------
 # njlead run
 # ---------------------------------------------------------------------------

@@ -133,16 +133,15 @@ def run_pipeline(
         if use_drive:
             from njlead.drive import download_new_pdfs
             _log.info("Downloading PDFs from Google Drive...")
-            print("Downloading PDFs from Google Drive...")
             downloaded_files = download_new_pdfs(
                 input_folder_id, input_dir, include_processed=full_refresh,
             )
             pdf_count = len(downloaded_files)
-            print(f"  {pdf_count} PDF(s) to process")
+            _log.info("  %d PDF(s) to process", pdf_count)
             summary["downloaded"] = pdf_count
 
             if pdf_count == 0:
-                print("No new PDFs found. Nothing to do.")
+                _log.info("No new PDFs found. Nothing to do.")
                 summary["ingested"] = 0
                 summary["skipped"] = 0
                 summary["failed"] = 0
@@ -154,13 +153,13 @@ def run_pipeline(
         # Apply --limit after download
         if limit is not None and use_drive and len(downloaded_files) > limit:
             downloaded_files = downloaded_files[:limit]
-            print(f"  limited to {limit} file(s)")
+            _log.info("  Limited to %d file(s)", limit)
 
         # --- Step 2: Ingest into a fresh local DB ---
         db_path = run_dir / "leads.db"
         os.environ["NJLEAD_DB"] = str(db_path)
         init_db(db_path)
-        print(f"\nIngesting into fresh database: {db_path.name}")
+        _log.info("Ingesting into fresh database: %s", db_path.name)
 
         counts = ingest_folder(input_dir, limit=limit)
         summary.update(counts)
@@ -173,11 +172,11 @@ def run_pipeline(
 
         # --- Step 3: Export to local CSV ---
         if counts.get("ingested", 0) > 0:
-            print("\nExporting to CSV...")
+            _log.info("Exporting to CSV...")
             try:
                 local_csv = export_to_csv(output_dir=output_dir)
                 summary["export_path"] = str(local_csv)
-                print(f"  Exported: {local_csv.name}")
+                _log.info("  Exported: %s", local_csv.name)
 
                 # Count rows
                 with open(local_csv, "r", encoding="utf-8") as f:
@@ -187,7 +186,7 @@ def run_pipeline(
                 _log.warning("Export failed: %s", e)
                 summary["export_error"] = str(e)
         else:
-            print("\nNo files ingested — skipping export.")
+            _log.info("No files ingested — skipping export.")
 
         # --- Step 3b: Export issues to CSV ---
         issues_csv_path = _export_issues(db_path, output_dir)
@@ -200,7 +199,7 @@ def run_pipeline(
 
         # --- Step 4: Merge into master.csv on Drive ---
         if use_drive and summary.get("export_path"):
-            print("\nMerging into master.csv on Drive...")
+            _log.info("Merging into master.csv on Drive...")
             local_csv = Path(summary["export_path"])
 
             # Download existing master.csv (if any)
@@ -224,7 +223,7 @@ def run_pipeline(
             summary["master_rows"] = total_rows
 
             upload_file(merged_master, output_folder_id, overwrite_name="master.csv")
-            print(f"  master.csv uploaded ({total_rows} rows)")
+            _log.info("  master.csv uploaded (%d rows)", total_rows)
 
             # Merge issues.csv
             if issues_csv_path:
@@ -245,19 +244,19 @@ def run_pipeline(
                 )
                 upload_file(merged_issues, output_folder_id, overwrite_name="issues.csv")
                 summary["issues_rows"] = issue_total
-                print(f"  issues.csv uploaded ({issue_total} rows)")
+                _log.info("  issues.csv uploaded (%d rows)", issue_total)
 
         elif local_folder and summary.get("export_path"):
             # Local mode: just copy to working dir
             local_csv = Path(summary["export_path"])
             dest = Path.cwd() / "master.csv"
             shutil.copy2(local_csv, dest)
-            print(f"\n  master.csv written to {dest}")
+            _log.info("  master.csv written to %s", dest)
 
         # --- Step 5: Move processed PDFs to Drive Processed folder ---
         if use_drive and downloaded_files:
             from njlead.drive import move_to_processed
-            print("\nMoving processed PDFs to Drive Processed folder...")
+            _log.info("Moving processed PDFs to Drive Processed folder...")
             moved = 0
             for f in downloaded_files:
                 local_path = f.get("local_path")
@@ -268,16 +267,16 @@ def run_pipeline(
                     except Exception as e:
                         _log.warning("Failed to move %s: %s", f["name"], e)
             summary["moved_to_processed"] = moved
-            print(f"  {moved} file(s) moved")
+            _log.info("  %d file(s) moved", moved)
 
         # --- Step 6: Write last_run.txt ---
         if use_drive:
             from njlead.drive import upload_text
             report_text = _format_run_report(summary)
             upload_text(report_text, output_folder_id, "last_run.txt")
-            print("\n  last_run.txt uploaded to Drive output folder")
+            _log.info("  last_run.txt uploaded to Drive output folder")
 
-        print("\nDone!")
+        _log.info("Done!")
         return summary
 
     finally:

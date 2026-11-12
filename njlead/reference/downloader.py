@@ -24,9 +24,12 @@ and update the constant.
 """
 
 import csv
+import logging
 import urllib.request
 import zipfile
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # URLs — update these when NCES publishes a new release
@@ -90,7 +93,7 @@ def download_ccd(year: int, dest_dir: Path) -> Path:
 
     # Step 1: download the ZIP to a temp location inside dest_dir
     zip_path = dest_dir / f"ccd_sch_{year}.zip"
-    print(f"  downloading CCD directory: {CCD_DIRECTORY_URL}")
+    _log.info("Downloading CCD directory: %s", CCD_DIRECTORY_URL)
     _download(CCD_DIRECTORY_URL, zip_path)
 
     # Step 2: open the ZIP without extracting everything; find the CSV
@@ -137,7 +140,7 @@ def download_ccd(year: int, dest_dir: Path) -> Path:
                     writer.writerow({c: row.get(c, "") for c in keep_cols})
                     kept += 1
 
-        print(f"  CCD -> {out_path} ({kept} NJ schools)")
+        _log.info("CCD -> %s (%d NJ schools)", out_path, kept)
 
     # Tidy up: remove the big ZIP — the slimmed CSV is enough
     zip_path.unlink(missing_ok=True)
@@ -160,7 +163,7 @@ def download_edge_geocodes(year: int, dest_dir: Path) -> Path:
     # NCES ships EDGE as a ZIP containing an XLSX (as of the 2023-24 release).
     # We download the ZIP, extract the XLSX to a temp path, then load it.
     zip_path = dest_dir / f"edge_geocodes_{year}.zip"
-    print(f"  downloading EDGE geocodes: {EDGE_GEOCODE_URL}")
+    _log.info("Downloading EDGE geocodes: %s", EDGE_GEOCODE_URL)
     _download(EDGE_GEOCODE_URL, zip_path)
 
     xlsx_path = None
@@ -182,7 +185,7 @@ def download_edge_geocodes(year: int, dest_dir: Path) -> Path:
     # (e.g. if a user only ever runs `njlead init` and `njlead ingest`).
     from openpyxl import load_workbook
 
-    print(f"  reading {xlsx_path.name} ...")
+    _log.info("Reading %s ...", xlsx_path.name)
     wb = load_workbook(xlsx_path, read_only=True, data_only=True)
     ws = wb.active
 
@@ -225,7 +228,7 @@ def download_edge_geocodes(year: int, dest_dir: Path) -> Path:
     wb.close()
     xlsx_path.unlink(missing_ok=True)
     zip_path.unlink(missing_ok=True)
-    print(f"  EDGE -> {out_path} ({kept} NJ geocodes)")
+    _log.info("EDGE -> %s (%d NJ geocodes)", out_path, kept)
     return out_path
 
 
@@ -289,7 +292,7 @@ def build_lookup(ccd_csv: Path, edge_csv: Path, out_path: Path) -> Path:
             })
             joined += 1
 
-    print(f"  lookup -> {out_path} ({joined} schools)")
+    _log.info("Lookup -> %s (%d schools)", out_path, joined)
     return out_path
 
 

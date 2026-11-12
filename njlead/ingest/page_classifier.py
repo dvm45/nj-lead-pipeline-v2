@@ -157,7 +157,7 @@ _CLASSIFY_PROMPT = (
 
 _HAIKU_MODEL_BEDROCK = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _HAIKU_MODEL_ANTHROPIC = "claude-haiku-4-5"
-_CLASSIFY_DPI = 100  # lower than extraction DPI — just need to read the layout
+_CLASSIFY_DPI = 72  # just need layout recognition, not fine text
 
 
 def _render_page_b64(pdf_path: Path, page_num: int) -> str:
@@ -206,6 +206,11 @@ def classify_scanned_page(
         message = client.messages.create(
             model=model_id,
             max_tokens=32,
+            system=[{
+                "type": "text",
+                "text": _CLASSIFY_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
             messages=[{
                 "role": "user",
                 "content": [
@@ -217,7 +222,7 @@ def classify_scanned_page(
                             "data": b64,
                         },
                     },
-                    {"type": "text", "text": _CLASSIFY_PROMPT},
+                    {"type": "text", "text": "Classify this page."},
                 ],
             }],
         )
@@ -257,6 +262,18 @@ def filter_noise_pages(
     """
     kept: list[dict] = []
     dropped = 0
+
+    # If every page is scanned, skip classification entirely — in practice
+    # all-scanned reports are single-lab data tables, and classifying every
+    # page just burns Haiku tokens to return "data_table" on each one.
+    all_scanned = all(
+        pg.get("is_blank") or not (pg.get("raw_text") or "").strip()
+        for pg in pages
+        if pg["page_num"] != 0
+    )
+    if all_scanned and len(pages) > 1:
+        _log.debug("All pages scanned; skipping classification for %s", pdf_path)
+        return pages, 0
 
     # Lazy-init the Haiku client only if there are scanned pages to classify
     haiku_client = None

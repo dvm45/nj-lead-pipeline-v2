@@ -324,12 +324,10 @@ def verify_report(
             overall = result.get("overall_confidence", 1.0)
             multi = result.get("is_multi_school", False)
             attr_ok = result.get("school_attribution_correct", True)
-            print(
-                f"    [verify] sonnet in={in_tok} out={out_tok}  "
-                f"multi_school={multi}  attribution_ok={attr_ok}  "
-                f"missed={missed}  flagged={flagged}  "
-                f"confidence={overall:.2f}",
-                flush=True,
+            _log.info(
+                "[verify] sonnet in=%d out=%d  multi_school=%s  attribution_ok=%s  "
+                "missed=%d  flagged=%d  confidence=%.2f",
+                in_tok, out_tok, multi, attr_ok, missed, flagged, overall,
             )
             return result
 
