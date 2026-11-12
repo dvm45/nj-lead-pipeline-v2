@@ -63,6 +63,9 @@ class Document(Base):
     # When this file was added to the database
     ingested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
+    # The year this report was issued (from the cover/header, not sample dates)
+    report_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # 'ok', 'partial', or 'failed'
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok")
 
@@ -183,6 +186,9 @@ class Sample(Base):
 
     # Year only — used when we can find the year but not the full date
     test_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # School address as printed in the PDF (fallback when NCES match is missing)
+    school_address: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     document: Mapped["Document"] = relationship("Document", back_populates="samples")
     school: Mapped["School | None"] = relationship("School", back_populates="samples")

@@ -162,6 +162,10 @@ def ingest_report_llm(
     if not report.school_name and hints.get("school_name"):
         report.school_name = hints["school_name"]
 
+    # Store report_year on the document row
+    if report.report_year is not None:
+        doc.report_year = report.report_year
+
     # --- Sonnet verification pass ---
     # Conditional: skip verification for high-confidence, single-school,
     # short reports where the extractor is unlikely to have made errors.
@@ -214,9 +218,14 @@ def ingest_report_llm(
         school_cache[key] = s
         return s
 
+    # Resolve per-row school_address: use the row override if set,
+    # otherwise fall back to the report-level address.
+    default_address = report.school_address
+
     written = 0
     for m in accepted:
         row_school = _resolve_school(m.school_name, m.district)
+        row_address = getattr(m, "school_address", None) or default_address
         sample = Sample(
             document_id=doc.id,
             school_id=row_school.id if row_school else None,
@@ -226,6 +235,7 @@ def ingest_report_llm(
             draw_type=getattr(m, "draw_type", None),
             sample_date=m.sample_date,
             test_year=m.test_year,
+            school_address=row_address,
         )
         session.add(sample)
         session.flush()

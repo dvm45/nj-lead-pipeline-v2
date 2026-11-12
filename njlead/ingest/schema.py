@@ -65,8 +65,12 @@ class ExtractedMeasurement(BaseModel):
         default=None,
         description="District for THIS specific sample, only when it differs from the report header. Leave null when same as the report header.",
     )
+    school_address: str | None = Field(
+        default=None,
+        description="Street address for THIS specific school/building, only when the report prints it AND it differs from the report header. Leave null otherwise.",
+    )
 
-    analyte: str = Field(default="lead", description="What was measured; almost always 'lead'.")
+    analyte: str = Field(default="lead", description="What was measured; almost always 'lead'. Use 'copper' for copper results.")
     result_ppb: float = Field(
         ...,
         description="Lead concentration normalized to ppb (= ug/L). 'ND'/'None Detected' -> 0.0. '<1.00' -> the detection limit (1.0).",
@@ -108,7 +112,13 @@ class ExtractedMeasurement(BaseModel):
     @field_validator("analyte")
     @classmethod
     def _normalize_analyte(cls, v: str) -> str:
-        return v.strip().lower() if v else "lead"
+        if not v:
+            return "lead"
+        normalized = v.strip().lower()
+        # Map common aliases to canonical "lead"
+        if normalized in ("pb", "lead (pb)", "pb (lead)", "total lead"):
+            return "lead"
+        return normalized
 
 
 class ExtractedReport(BaseModel):
@@ -128,6 +138,14 @@ class ExtractedReport(BaseModel):
     lab_name: str | None = Field(
         default=None,
         description="The lab / vendor that produced the report (e.g. 'EMSL', 'LEW Environmental', 'RAMM'). Read off the letterhead; null if unclear.",
+    )
+    school_address: str | None = Field(
+        default=None,
+        description="Street address of the school/facility as printed in the report (e.g. '100 Grand St, Paterson, NJ 07501'). Null if not stated.",
+    )
+    report_year: int | None = Field(
+        default=None,
+        description="The year this report was issued or the testing year stated on the cover/header (e.g. 2023). NOT the sample collection date — that goes in sample_date/test_year. Null if not stated.",
     )
     measurements: list[ExtractedMeasurement] = Field(
         default_factory=list,

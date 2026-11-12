@@ -48,6 +48,7 @@ CSV_COLUMNS = [
     "draw_type",
     "sample_date",
     "year",
+    "report_year",
     "lead_concentration_ppb",
     "confidence",
     "source_page",
@@ -149,8 +150,11 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
 
     # --- Step 3: query and write ---------------------------------------
     with get_session() as session:
+        # Only export lead measurements — non-lead analytes (copper, etc.)
+        # stay in the DB but are excluded from the lead-focused output.
         measurements = (
             session.query(Measurement)
+            .filter(Measurement.analyte == "lead")
             .join(Sample, Measurement.sample_id == Sample.id)
             .outerjoin(School, Sample.school_id == School.id)
             .join(Document, Sample.document_id == Document.id)
@@ -192,19 +196,32 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                 district_out = (match.district_name if match else (school.district if school else "")) or ""
                 school_name_out = (match.school_name if match else (school.name if school else "")) or ""
 
+                # Year: prefer sample date, fall back to test_year
                 year_out = sample.test_year
                 if year_out is None and sample.sample_date is not None:
                     year_out = sample.sample_date.year
+
+                # Report year (from the document, not sample-level)
+                report_year_out = getattr(doc, "report_year", None)
+
+                # Year fallback: if sample year is blank, use report year
+                if year_out is None and report_year_out is not None:
+                    year_out = report_year_out
 
                 county_out = match.county if match else ""
                 if not county_out:
                     county_out = _county_from_path(doc.file_path)
 
+                # Address: NCES match first, then PDF-extracted address
+                address_out = (match.address if match else "") or ""
+                if not address_out:
+                    address_out = getattr(sample, "school_address", "") or ""
+
                 writer.writerow({
                     "county": county_out,
                     "district": district_out,
                     "school_name": school_name_out,
-                    "address": match.address if match else "",
+                    "address": address_out,
                     "coordinates": _format_coordinates(match),
                     "sample_id": sample.sample_id or "",
                     "sample_location": sample.location or "",
@@ -212,6 +229,7 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                     "draw_type": getattr(sample, "draw_type", "") or "",
                     "sample_date": sample.sample_date.isoformat() if sample.sample_date else "",
                     "year": year_out if year_out is not None else "",
+                    "report_year": report_year_out if report_year_out is not None else "",
                     "lead_concentration_ppb": m.result_ppb,
                     "confidence": m.confidence if m.confidence is not None else "",
                     "source_page": m.source_page if m.source_page is not None else "",
