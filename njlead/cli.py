@@ -26,6 +26,82 @@ app = typer.Typer(
 
 
 # ---------------------------------------------------------------------------
+# njlead run
+# ---------------------------------------------------------------------------
+
+@app.command()
+def run(
+    full_refresh: bool = typer.Option(
+        False,
+        "--full-refresh",
+        help="Reprocess ALL PDFs (including already-processed ones) and rebuild master.csv from scratch.",
+    ),
+    limit: int = typer.Option(
+        None,
+        "--limit", "-n",
+        help="Only process the first N files. Useful for a cheap test run.",
+    ),
+    local: Path = typer.Option(
+        None,
+        "--local",
+        help="Skip Google Drive and process a local folder instead (for debugging).",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+) -> None:
+    """
+    Run the full pipeline in one step.
+
+    Downloads PDFs from Google Drive, ingests them, exports to CSV,
+    merges into master.csv on Drive, and moves processed PDFs to the
+    Processed subfolder. Uses a fresh database for each run.
+
+    For local debugging, use --local <folder> to skip Drive entirely.
+    """
+    from njlead import config
+
+    # Preflight: check LLM credentials
+    if not config.api_key_is_set():
+        typer.echo(
+            "LLM credentials not found. Run 'njlead check-llm' for setup help.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    from njlead.runner import run_pipeline
+
+    try:
+        summary = run_pipeline(
+            full_refresh=full_refresh,
+            limit=limit,
+            local_folder=local,
+        )
+    except FileNotFoundError as e:
+        typer.echo(f"\n{e}", err=True)
+        raise typer.Exit(code=1)
+    except RuntimeError as e:
+        typer.echo(f"\nError: {e}", err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        if type(e).__name__ == "LLMConfigError":
+            typer.echo(f"\nLLM setup problem: {e}", err=True)
+            raise typer.Exit(code=1)
+        raise
+
+    # Print final summary
+    typer.echo("")
+    typer.echo("=" * 40)
+    typer.echo(f"  Ingested:    {summary.get('ingested', 0)}")
+    typer.echo(f"  Skipped:     {summary.get('skipped', 0)}")
+    typer.echo(f"  Failed:      {summary.get('failed', 0)}")
+    typer.echo(f"  CSV rows:    {summary.get('master_rows', summary.get('rows_exported', 0))}")
+    typer.echo(f"  Issues:      {summary.get('issues_rows', summary.get('issues_exported', 0))}")
+    typer.echo("=" * 40)
+
+
+# ---------------------------------------------------------------------------
 # njlead init
 # ---------------------------------------------------------------------------
 
