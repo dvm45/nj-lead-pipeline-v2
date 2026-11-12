@@ -14,8 +14,10 @@ dependencies = [
     "typer>=0.12",
     "rapidfuzz>=3.0",
     "openpyxl>=3.1",
-    "anthropic>=0.40",
+    "anthropic[bedrock]>=0.40",
     "python-dotenv>=1.0",
+    "google-api-python-client>=2.100",
+    "google-auth>=2.20",
 ]
 
 # This registers `njlead` as a command-line tool.

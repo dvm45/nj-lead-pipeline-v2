@@ -94,9 +94,9 @@ def ingest(
                 "No AWS credentials found for Bedrock.\n"
                 "\n"
                 "The pipeline needs AWS credentials in one of these places:\n"
-                "  1) Run:  aws configure   (writes ~/.aws/credentials)\n"
-                "  2) OR set env vars: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY\n"
-                "  3) OR (on EC2/ECS) an attached instance role\n"
+                "  1) Set AWS_BEARER_TOKEN_BEDROCK in your .env file\n"
+                "  2) OR run:  aws configure   (writes ~/.aws/credentials)\n"
+                "  3) OR set env vars: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY\n"
                 "\n"
                 f"Region currently set to: {config.AWS_REGION}\n"
                 "Confirm status any time with:  njlead check-llm",
@@ -218,9 +218,9 @@ def check_llm() -> None:
         typer.echo("")
         if config.LLM_PROVIDER == "bedrock":
             typer.echo("To provide AWS credentials, pick one:")
+            typer.echo("  - Set AWS_BEARER_TOKEN_BEDROCK in your .env file")
             typer.echo("  - aws configure       (writes ~/.aws/credentials)")
             typer.echo("  - set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars")
-            typer.echo("  - (on EC2/ECS) attach an instance role with Bedrock permissions")
         else:
             typer.echo("To set the API key:")
             typer.echo("  1) copy .env.example .env")

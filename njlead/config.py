@@ -9,10 +9,9 @@ Two providers are supported for calling Claude:
 
   - "anthropic"  -> Anthropic's own API, authed with ANTHROPIC_API_KEY
   - "bedrock"    -> AWS Bedrock, authed with your normal AWS credentials
-                    (env vars, ~/.aws/credentials, or an EC2 instance role)
+                    (env vars, ~/.aws/credentials, or a Bedrock API key)
 
-Set NJLEAD_LLM_PROVIDER in your .env to pick one. Default is "bedrock",
-matching the current project deployment.
+Set NJLEAD_LLM_PROVIDER in your .env to pick one. Default is "bedrock".
 
 Nothing in this module fails when credentials are missing. That only matters
 at the moment an LLM call is actually made (see llm_extractor.py), so you can
@@ -108,12 +107,11 @@ def api_key_is_set() -> bool:
     True if credentials for the *currently selected* provider are present.
 
     - For "anthropic": ANTHROPIC_API_KEY must be set.
-    - For "bedrock":   boto3 will discover credentials in this order:
+    - For "bedrock":   checked in priority order:
+                       AWS_BEARER_TOKEN_BEDROCK (Bedrock API key),
                        env vars (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY),
-                       shared credential file (~/.aws/credentials), or an
-                       EC2/ECS instance role. We check env vars and the
-                       shared file here - the instance-role case can only be
-                       verified by actually making a call.
+                       or shared credential file (~/.aws/credentials from
+                       `aws configure`).
     """
     if LLM_PROVIDER == "anthropic":
         return bool(ANTHROPIC_API_KEY)
@@ -130,16 +128,6 @@ def api_key_is_set() -> bool:
         shared = Path.home() / ".aws" / "credentials"
         if shared.exists():
             return True
-        # EC2/ECS instance role — ask boto3 to resolve credentials from the
-        # metadata service. This covers IAM roles attached to the instance.
-        try:
-            import botocore.session
-            session = botocore.session.get_session()
-            creds = session.get_credentials()
-            if creds is not None:
-                return True
-        except Exception:
-            pass
         return False
 
     # Unknown provider string - treat as unconfigured.

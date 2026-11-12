@@ -221,9 +221,9 @@ def _build_client():
         if config.LLM_PROVIDER == "bedrock":
             raise LLMConfigError(
                 "No AWS credentials found for Bedrock. Set them up with one of:\n"
+                "  - AWS_BEARER_TOKEN_BEDROCK in your .env file\n"
                 "  - aws configure           (writes ~/.aws/credentials)\n"
                 "  - AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env vars\n"
-                "  - an EC2/ECS instance role (when running on AWS)\n"
                 "Check status any time with:  njlead check-llm"
             )
         raise LLMConfigError(
@@ -242,7 +242,7 @@ def _build_client():
 
     if config.LLM_PROVIDER == "bedrock":
         # AnthropicBedrock reads AWS creds the same way boto3 does (env vars,
-        # ~/.aws/credentials, or instance role). We only pass the region
+        # ~/.aws/credentials, or Bedrock API key). We only pass the region
         # explicitly so it doesn't default to us-east-1.
         try:
             client = anthropic.AnthropicBedrock(aws_region=config.AWS_REGION)

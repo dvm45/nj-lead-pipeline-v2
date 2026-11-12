@@ -7,8 +7,6 @@ openpyxl>=3.1        # reads the EDGE geocode XLSX file from NCES
 anthropic[bedrock]>=0.40  # Claude API client (the [bedrock] extra pulls boto3 for AWS Bedrock auth)
 python-dotenv>=1.0   # loads the ANTHROPIC_API_KEY from a local .env file (optional, keeps the key out of code)
 
-# Web UI and Google Drive integration
-flask>=3.0           # lightweight web framework for the browser dashboard
+# Google Drive integration
 google-api-python-client>=2.100  # Google Drive API (download PDFs, upload CSVs)
 google-auth>=2.20    # service account authentication for Google APIs
-gunicorn>=21.2       # production web server (used on EC2 instead of Flask dev server)
