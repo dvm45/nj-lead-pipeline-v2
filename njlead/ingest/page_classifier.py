@@ -203,6 +203,8 @@ def classify_scanned_page(
     can't classify).
     """
     try:
+        from njlead.token_tracker import tracker
+
         b64 = _render_page_b64(pdf_path, page_num)
         message = client.messages.create(
             model=model_id,
@@ -226,6 +228,11 @@ def classify_scanned_page(
                     {"type": "text", "text": "Classify this page."},
                 ],
             }],
+        )
+        tracker.record(
+            "haiku",
+            input_tokens=message.usage.input_tokens,
+            output_tokens=message.usage.output_tokens,
         )
         label = message.content[0].text.strip().lower().replace(" ", "_")
         if label in ("data_table", "chain_of_custody", "cover_letter", "boilerplate", "other"):

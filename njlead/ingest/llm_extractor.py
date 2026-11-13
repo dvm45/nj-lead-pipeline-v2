@@ -273,13 +273,12 @@ def _build_client():
 # (image-heavy scans hit this well before pure text does).
 _BATCH_TRIGGER_PAGES_TEXT = 12    # split text-only reports > this many pages
 _BATCH_TRIGGER_PAGES_IMAGE = 4    # split scanned reports > this many image pages
-# Nominal batch size for text reports. 2 fits even dense district-wide
-# reports (Paterson-style: ~30-40 measurements per page → ~15k output
-# tokens for 2 pages, safely under the 16384 non-streaming cap). Larger
-# text batches truncated on that corpus. If a batch still truncates,
-# the recursive retry halves further and the adaptive-shrink logic
-# downsizes the next batch.
-_BATCH_SIZE_PAGES = 2
+# Nominal batch size for text reports. 8 pages keeps most reports to 2-3
+# calls instead of 10+. The adaptive-shrink logic halves the next batch
+# whenever output nears the token cap, so dense pages still get smaller
+# batches automatically. Image batches stay small because each image is
+# ~1MB of tokens.
+_BATCH_SIZE_PAGES = 8
 _BATCH_SIZE_IMAGE = 2             # nominal batch size when splitting scans
 
 
@@ -289,6 +288,8 @@ def _summarize_response(pages_batch: list[dict], message, label: str) -> tuple[i
     truncated, empty_tool, tool_input_dict, out_tokens). Empty tool_input_dict
     = {} when no tool call was present.
     """
+    from njlead.token_tracker import tracker
+
     pages_text = sum(
         1 for p in pages_batch
         if not p.get("is_blank") and (p.get("raw_text") or "").strip()
@@ -309,6 +310,9 @@ def _summarize_response(pages_batch: list[dict], message, label: str) -> tuple[i
             break
     meas = len(tool_input.get("measurements") or [])
     empty = tool_present and meas == 0
+
+    # Track token usage for cost reporting
+    tracker.record("opus", input_tokens=in_tokens, output_tokens=out_tokens, empty=empty)
 
     flags: list[str] = []
     if truncated:
@@ -494,7 +498,30 @@ def extract_report(pages: list[dict], pdf_path: Path) -> ExtractedReport:
             else:
                 queue.appendleft(nxt)
 
+    # Deduplicate identical rows across batches (same sample_id + result + location)
     if batch_num > 1:
+        before = len(all_measurements)
+        seen: set[tuple] = set()
+        deduped: list[dict] = []
+        deduped_ranges: list[tuple[int, int]] = []
+        for row, page_range in zip(all_measurements, all_page_ranges, strict=False):
+            key = (
+                row.get("sample_id"),
+                row.get("sample_location"),
+                row.get("result_ppb"),
+                row.get("school_name"),
+                row.get("draw_type"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+            deduped_ranges.append(page_range)
+        removed = before - len(deduped)
+        if removed:
+            _log.info("[llm] removed %d duplicate rows during batch merge", removed)
+        all_measurements = deduped
+        all_page_ranges = deduped_ranges
         _log.info("[llm] merged %d batches -> %d total measurements", batch_num, len(all_measurements))
 
     merged_payload = {**header, "measurements": all_measurements}
