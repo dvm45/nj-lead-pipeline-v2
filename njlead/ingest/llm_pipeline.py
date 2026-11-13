@@ -16,17 +16,15 @@ extractor + validation modules.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 
+from rapidfuzz import fuzz
 from sqlalchemy.orm import Session
 
 from njlead.db.models import Document, Issue, Measurement, Sample, School
-
-import logging
-import re
-
-from rapidfuzz import fuzz
 
 _log = logging.getLogger(__name__)
 
@@ -121,7 +119,7 @@ def log_issue(
         page_num=page_num,
         issue_type=issue_type,
         detail=detail,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     session.add(issue)
 
@@ -144,9 +142,9 @@ def ingest_report_llm(
     # Lazy import keeps the anthropic SDK optional at import time — the CLI's
     # check-llm command can still tell the user the SDK is missing even when
     # this module gets imported.
-    from njlead.ingest.llm_extractor import extract_report, LLMExtractionError, parse_folder_hints
+    from njlead.ingest.llm_extractor import LLMExtractionError, extract_report, parse_folder_hints
     from njlead.ingest.validation import validate_report
-    from njlead.ingest.verifier import verify_report, apply_verification, should_verify
+    from njlead.ingest.verifier import apply_verification, should_verify, verify_report
 
     # extract_report may raise LLMConfigError (propagate) or LLMExtractionError.
     try:
@@ -200,7 +198,7 @@ def ingest_report_llm(
 
     # Cache per-row schools within this report to avoid a query per measurement
     # when many rows share the same school.
-    school_cache: dict[tuple[str | None, str | None], "School | None"] = {}
+    school_cache: dict[tuple[str | None, str | None], School | None] = {}
     if default_school is not None:
         school_cache[(report.school_name, report.district)] = default_school
 

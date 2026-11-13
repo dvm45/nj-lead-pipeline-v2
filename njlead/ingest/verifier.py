@@ -186,7 +186,7 @@ def _build_source_digest(pages: list[dict], pdf_path: Path) -> tuple[str, str]:
         if not text:
             data_lines.append(f"[Page {pg['page_num']+1}: scanned image, no text]")
             continue
-        remaining = char_budget - sum(len(l) for l in data_lines)
+        remaining = char_budget - sum(len(line) for line in data_lines)
         if remaining <= 0:
             data_lines.append(f"... and {len(pages) - len(data_lines) - 1} more pages")
             break
@@ -241,14 +241,11 @@ def should_verify(
 
     avg_conf = sum(m.confidence for m in report.measurements) / n_meas
 
-    if (
+    return not (
         n_pages <= _SKIP_MAX_PAGES
         and avg_conf >= _SKIP_MIN_AVG_CONFIDENCE
         and n_meas <= _SKIP_MAX_MEASUREMENTS
-    ):
-        return False
-
-    return True
+    )
 
 
 def verify_report(

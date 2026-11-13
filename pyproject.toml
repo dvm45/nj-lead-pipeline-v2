@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "njlead"
-version = "0.1.0"
+version = "1.0.0"
 description = "NJ school lead testing PDF extraction pipeline"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,6 +25,21 @@ dependencies = [
 [project.scripts]
 njlead = "njlead.cli:app"
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.7"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["njlead*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+exclude = ["nj_lead_pipeline_v2/", "export_paterson_*.py", "qaqc_*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

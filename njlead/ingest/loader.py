@@ -17,7 +17,7 @@ caller aborts the run with setup instructions.
 
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -62,7 +62,7 @@ def _ingest_one(session: Session, path: Path) -> str:
     # the anthropic SDK until we actually need it.
     from njlead.ingest.llm_pipeline import ingest_report_llm, log_issue
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # --- Step 1: Deduplication ---
     file_hash = _hash_file(path)

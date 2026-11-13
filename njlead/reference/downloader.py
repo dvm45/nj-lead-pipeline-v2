@@ -199,7 +199,7 @@ def download_edge_geocodes(year: int, dest_dir: Path) -> Path:
         except ValueError:
             raise RuntimeError(
                 f"EDGE XLSX missing column '{name}'. Header: {header}"
-            )
+            ) from None
 
     ncessch_idx = col("NCESSCH")
     lat_idx = col("LAT")
@@ -247,13 +247,13 @@ def build_lookup(ccd_csv: Path, edge_csv: Path, out_path: Path) -> Path:
     """
     # Step 1: load EDGE coords into a dict for fast lookup by NCES ID
     coords: dict[str, tuple[str, str]] = {}
-    with open(edge_csv, "r", newline="", encoding="utf-8") as f:
+    with open(edge_csv, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             coords[row["NCESSCH"]] = (row["LAT"], row["LON"])
 
     # Step 2: stream the CCD directory and write the joined output
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(ccd_csv, "r", newline="", encoding="utf-8") as src, \
+    with open(ccd_csv, newline="", encoding="utf-8") as src, \
          open(out_path, "w", newline="", encoding="utf-8") as out:
 
         reader = csv.DictReader(src)

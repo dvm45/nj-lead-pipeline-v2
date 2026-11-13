@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 from njlead.ingest.schema import ExtractedMeasurement
 
@@ -63,7 +63,7 @@ _PLAIN_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)")
 _PPB_ABS_TOL = 0.51  # absorbs rounding between printed value and result_ppb
 
 
-class Decision(str, Enum):
+class Decision(StrEnum):
     ACCEPT = "accept"
     REVIEW = "review"
 

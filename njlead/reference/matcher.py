@@ -28,7 +28,6 @@ from pathlib import Path
 # than running individual ratio() calls in a Python loop.
 from rapidfuzz import fuzz, process
 
-
 # -----------------------------------------------------------------------------
 # Public dataclasses
 # -----------------------------------------------------------------------------
@@ -213,7 +212,7 @@ class SchoolMatcher:
         # Result cache keyed by (input_name, input_district).
         self._cache: dict[tuple[str, str], SchoolMatch | None] = {}
 
-        with open(lookup_csv, "r", newline="", encoding="utf-8") as f:
+        with open(lookup_csv, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 self._records.append(row)
                 self._norm_names.append(_normalize(row["school_name"]))

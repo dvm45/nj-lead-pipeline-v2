@@ -9,7 +9,13 @@ __pycache__/
 
 # Local database and generated exports
 leads.db
+leads_*.db
 export_*.csv
+master.csv
+issues.csv
+
+# Run logs
+logs/
 
 # PDF corpus - research data, not source code
 data/

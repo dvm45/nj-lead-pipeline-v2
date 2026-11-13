@@ -87,14 +87,14 @@ def run(
         )
     except FileNotFoundError as e:
         typer.echo(f"\n{e}", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
     except RuntimeError as e:
         typer.echo(f"\nError: {e}", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
     except Exception as e:
         if type(e).__name__ == "LLMConfigError":
             typer.echo(f"\nLLM setup problem: {e}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from None
         raise
 
     # Print final summary
@@ -198,7 +198,7 @@ def ingest(
                 "Confirm status any time with:  njlead check-llm",
                 err=True,
             )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     # Auto-initialize the database if leads.db doesn't exist yet
     db_path = Path.cwd() / "leads.db"
@@ -222,7 +222,7 @@ def ingest(
         if type(e).__name__ == "LLMConfigError":
             typer.echo("", err=True)
             typer.echo(f"LLM setup problem: {e}", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from None
         raise
 
     # Print summary
@@ -364,7 +364,7 @@ def refresh_reference(
             "Edit njlead/reference/downloader.py and update the URL constants.",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     typer.echo("")
     typer.echo(f"Done. Lookup file: {lookup.resolve()}")
@@ -413,4 +413,4 @@ def export(
             )
     except RuntimeError as e:
         typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None

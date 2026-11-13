@@ -11,7 +11,7 @@ Call setup_logging() once at CLI startup.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -46,7 +46,7 @@ def setup_logging(log_dir: Path | None = None) -> Path | None:
 
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d_%H%M%S")
         log_path = log_dir / f"njlead_{timestamp}.log"
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)

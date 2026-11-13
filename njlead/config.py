@@ -126,9 +126,7 @@ def api_key_is_set() -> bool:
             return True
         # Shared credentials file (created by `aws configure`)
         shared = Path.home() / ".aws" / "credentials"
-        if shared.exists():
-            return True
-        return False
+        return bool(shared.exists())
 
     # Unknown provider string - treat as unconfigured.
     return False

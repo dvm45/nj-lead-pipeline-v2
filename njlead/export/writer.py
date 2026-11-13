@@ -24,7 +24,7 @@ Behavior on missing data:
 
 import csv
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy.orm import joinedload
@@ -33,7 +33,6 @@ from njlead.db.models import Document, Measurement, Sample, School
 from njlead.db.session import get_session
 from njlead.reference import LATEST_REFERENCE_YEAR
 from njlead.reference.matcher import SchoolMatch, SchoolMatcher
-
 
 # Gold-standard output columns, in order
 CSV_COLUMNS = [
@@ -140,7 +139,7 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
     matcher = SchoolMatcher(lookup_path)
 
     # --- Step 2: prepare output paths -----------------------------------
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%d_%H%M%S")
     output_path = output_dir / f"export_{timestamp}.csv"
     unmatched_path = Path.cwd() / "data" / "reference" / "unmatched_schools.csv"
 

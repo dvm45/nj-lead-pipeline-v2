@@ -21,7 +21,7 @@ import logging
 import os
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -49,20 +49,19 @@ def _merge_csv(
     if full_refresh or existing_path is None or not existing_path.exists():
         # Full refresh or no prior CSV — just use the new file as-is
         shutil.copy2(new_path, output_path)
-        with open(output_path, "r", encoding="utf-8") as f:
+        with open(output_path, encoding="utf-8") as f:
             return sum(1 for _ in f) - 1  # subtract header
 
     # Read the new CSV header to ensure column alignment
-    with open(new_path, "r", encoding="utf-8") as f:
+    with open(new_path, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         new_fieldnames = reader.fieldnames or []
         new_rows = list(reader)
 
     # Read existing CSV, dropping rows whose source_file was reprocessed
     kept_rows: list[dict] = []
-    with open(existing_path, "r", encoding="utf-8") as f:
+    with open(existing_path, encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        existing_fieldnames = reader.fieldnames or []
         for row in reader:
             if row.get(key_column, "") not in source_files_this_run:
                 kept_rows.append(row)
@@ -92,7 +91,6 @@ def run_pipeline(
 
     Returns a summary dict with counts and stats.
     """
-    from njlead import config
     from njlead.db.session import init_db
     from njlead.export.writer import export_to_csv
     from njlead.ingest.loader import ingest_folder
@@ -121,7 +119,7 @@ def run_pipeline(
     output_dir.mkdir()
 
     summary: dict = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "mode": "full_refresh" if full_refresh else "incremental",
         "use_drive": use_drive,
     }
@@ -179,7 +177,7 @@ def run_pipeline(
                 _log.info("  Exported: %s", local_csv.name)
 
                 # Count rows
-                with open(local_csv, "r", encoding="utf-8") as f:
+                with open(local_csv, encoding="utf-8") as f:
                     row_count = sum(1 for _ in f) - 1
                 summary["rows_exported"] = row_count
             except RuntimeError as e:
@@ -191,7 +189,7 @@ def run_pipeline(
         # --- Step 3b: Export issues to CSV ---
         issues_csv_path = _export_issues(db_path, output_dir)
         if issues_csv_path:
-            with open(issues_csv_path, "r", encoding="utf-8") as f:
+            with open(issues_csv_path, encoding="utf-8") as f:
                 issue_count = sum(1 for _ in f) - 1
             summary["issues_exported"] = issue_count
         else:
@@ -322,7 +320,7 @@ def _export_issues(db_path: Path, output_dir: Path) -> Path | None:
 def _format_run_report(summary: dict) -> str:
     """Format the run summary as human-readable text for last_run.txt."""
     lines = [
-        f"NJ Lead Pipeline — Run Report",
+        "NJ Lead Pipeline — Run Report",
         f"{'=' * 40}",
         f"Timestamp:  {summary.get('timestamp', 'unknown')}",
         f"Mode:       {summary.get('mode', 'unknown')}",

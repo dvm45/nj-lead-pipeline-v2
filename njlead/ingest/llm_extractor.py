@@ -129,7 +129,7 @@ def parse_folder_hints(pdf_path: Path) -> dict:
                 raw_district = parts[i + 1]
                 hints["district"] = _STRIP_SUFFIX_RE.sub("", raw_district).strip()
         if lower.replace("-", "").replace(" ", "") in {
-            l.replace(" ", "") for l in _KNOWN_LABS
+            lab.replace(" ", "") for lab in _KNOWN_LABS
         }:
             hints["lab"] = part.strip()
 
@@ -344,7 +344,7 @@ def _call_once(
     pdf_path: Path,
     folder_hints: dict | None = None,
     context_header: dict | None = None,
-) -> "tuple[dict, object]":
+) -> tuple[dict, object]:
     """One raw API call for a page batch. Returns (tool_input_dict, message)."""
     system_blocks = [
         {
@@ -510,7 +510,7 @@ def extract_report(pages: list[dict], pdf_path: Path) -> ExtractedReport:
     # validation without needing a parallel index. The pipeline reads
     # measurement._source_page_hi to set Measurement.source_page.
     if len(all_page_ranges) == len(report.measurements):
-        for m, (lo, hi) in zip(report.measurements, all_page_ranges):
+        for m, (lo, hi) in zip(report.measurements, all_page_ranges, strict=False):
             object.__setattr__(m, "_source_page_lo", lo)
             object.__setattr__(m, "_source_page_hi", hi)
     return report
