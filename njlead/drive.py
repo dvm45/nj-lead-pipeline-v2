@@ -141,8 +141,38 @@ def _local_md5(path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Public listing (used by find-duplicates before any download)
+# ---------------------------------------------------------------------------
+
+def list_drive_pdfs(input_folder_id: str) -> list[dict]:
+    """
+    List all PDFs in the Drive input folder without downloading anything.
+
+    Returns a list of dicts with keys: id, name, mimeType, md5Checksum,
+    size, relative_path.
+    """
+    service = _get_service()
+    results: list[dict] = []
+    _list_pdfs_recursive(service, input_folder_id, "", results)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Download
 # ---------------------------------------------------------------------------
+
+def _load_exclude_names() -> set[str]:
+    """Load filenames from exclude.txt (shared with ingest loader)."""
+    exclude_path = Path.cwd() / "exclude.txt"
+    if not exclude_path.exists():
+        return set()
+    names: set[str] = set()
+    for line in exclude_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            names.add(Path(line).name)
+    return names
+
 
 def download_new_pdfs(
     input_folder_id: str,
@@ -151,8 +181,8 @@ def download_new_pdfs(
     """
     Download PDFs from the Drive input folder, preserving subfolder structure.
 
-    Skips files that already exist locally with a matching MD5 checksum.
-    This avoids re-downloading the full corpus on every run.
+    Skips files in exclude.txt (duplicate detection output) and files that
+    already exist locally with a matching MD5 checksum.
 
     Returns a list of dicts for each file (both downloaded and skipped):
       {id, name, relative_path, md5Checksum, local_path, skipped}
@@ -162,12 +192,23 @@ def download_new_pdfs(
     service = _get_service()
     pdf_files: list[dict] = []
     _list_pdfs_recursive(service, input_folder_id, "", pdf_files)
+    excluded = _load_exclude_names()
 
     all_files: list[dict] = []
     downloaded_count = 0
     skipped_count = 0
+    excluded_count = 0
 
     for f in pdf_files:
+        # Skip files in exclude.txt before downloading
+        if f["name"] in excluded:
+            _log.info("Excluding %s (in exclude.txt)", f["relative_path"])
+            f["local_path"] = local_dir / f["relative_path"]
+            f["skipped"] = True
+            all_files.append(f)
+            excluded_count += 1
+            continue
+
         local_path = local_dir / f["relative_path"]
         f["local_path"] = local_path
 
@@ -195,6 +236,6 @@ def download_new_pdfs(
         downloaded_count += 1
         _log.info("Downloaded: %s", f["relative_path"])
 
-    _log.info("Drive sync: %d downloaded, %d already up-to-date (of %d total)",
-              downloaded_count, skipped_count, len(pdf_files))
+    _log.info("Drive sync: %d downloaded, %d cached, %d excluded (of %d total)",
+              downloaded_count, skipped_count, excluded_count, len(pdf_files))
     return all_files

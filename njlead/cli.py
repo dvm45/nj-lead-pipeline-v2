@@ -57,16 +57,29 @@ def run(
         dir_okay=True,
         resolve_path=True,
     ),
+    download_only: bool = typer.Option(
+        False,
+        "--download-only",
+        help="Download PDFs from Drive but do NOT run extraction. No Bedrock calls.",
+    ),
 ) -> None:
     """
     Run the full pipeline in one step.
 
-    Downloads PDFs from Google Drive (skipping files already cached locally),
-    ingests new files into the persistent leads.db, exports master.csv and
-    issues.csv to the output/ folder, and writes a run summary.
+    Downloads PDFs from Google Drive (skipping files in exclude.txt and
+    files already cached locally), ingests new files into the persistent
+    leads.db, exports master.csv and issues.csv to the output/ folder,
+    and writes a run summary.
+
+    Use --download-only to sync PDFs from Drive without any Bedrock
+    calls (useful before running find-duplicates on local copies).
 
     For local debugging, use --local <folder> to skip Drive entirely.
     """
+    if download_only:
+        _run_download_only()
+        return
+
     from njlead import config
 
     # Preflight: check LLM credentials
@@ -108,6 +121,41 @@ def run(
     typer.echo(f"  Issues:      {summary.get('issues_exported', 0)}")
     typer.echo("=" * 40)
     typer.echo("  Output:      output/master.csv")
+
+
+def _run_download_only() -> None:
+    """Download PDFs from Drive without running extraction."""
+    import os
+
+    from njlead.drive import download_new_pdfs
+
+    folder_id = os.environ.get("GDRIVE_INPUT_FOLDER_ID", "")
+    if not folder_id:
+        typer.echo(
+            "GDRIVE_INPUT_FOLDER_ID is not set in .env.\n"
+            "Set it to the Drive folder URL's folder ID.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+    local_dir = Path.cwd() / "input_pdfs"
+    local_dir.mkdir(exist_ok=True)
+
+    typer.echo("Downloading PDFs from Drive (no Bedrock calls)...")
+    all_files = download_new_pdfs(folder_id, local_dir)
+    downloaded = sum(1 for f in all_files if not f.get("skipped"))
+    skipped = sum(1 for f in all_files if f.get("skipped"))
+
+    typer.echo("")
+    typer.echo("=" * 40)
+    typer.echo(f"  Total on Drive:  {len(all_files)}")
+    typer.echo(f"  Downloaded:      {downloaded}")
+    typer.echo(f"  Skipped:         {skipped}  (cached or excluded)")
+    typer.echo("=" * 40)
+    typer.echo(f"  Local folder:    {local_dir}")
+    typer.echo("")
+    typer.echo("Next: njlead find-duplicates   (check for duplicates)")
+    typer.echo("Then: njlead run               (run extraction)")
 
 
 # ---------------------------------------------------------------------------
@@ -429,46 +477,90 @@ def find_duplicates(
     input_dir: Path = typer.Option(
         None,
         "--input-dir", "-i",
-        help="Folder to scan for duplicates (default: input_pdfs/).",
-        exists=True,
+        help="Folder with local PDFs (default: input_pdfs/). Local checks skipped if folder doesn't exist yet.",
         file_okay=False,
         dir_okay=True,
         resolve_path=True,
     ),
+    skip_drive: bool = typer.Option(
+        False,
+        "--skip-drive",
+        help="Skip the Drive check and only scan local files.",
+    ),
 ) -> None:
     """
-    Scan downloaded PDFs for duplicates. No Bedrock calls — runs locally.
+    Detect duplicate PDFs before running the pipeline. No Bedrock calls.
 
-    Detects three kinds of duplicates:
-      1. Exact: identical files with different names (MD5 match)
-      2. Text-similar: ≥90% extracted text overlap
-      3. DB overlap: ≥80% shared (sample_id, value) rows in leads.db
+    First checks the Drive input folder by md5Checksum (no download
+    required). Then scans local copies for text similarity and DB overlap.
 
     Writes output/duplicates_report.csv and auto-generates exclude.txt
-    for exact duplicates. The ingest command reads exclude.txt and skips
-    listed files.
+    for exact duplicates. Both `njlead run` and `njlead ingest` read
+    exclude.txt and skip listed files.
+
+    Recommended workflow:
+      1. njlead find-duplicates   (review the report)
+      2. njlead run               (skips excluded files)
     """
-    from njlead.duplicates import find_duplicates as do_find
+    import os
+
+    from njlead.duplicates import find_all_duplicates
+    from njlead.duplicates import find_duplicates as do_find_local
 
     if input_dir is None:
         input_dir = Path.cwd() / "input_pdfs"
-    if not input_dir.exists():
-        typer.echo(f"Input folder not found: {input_dir}", err=True)
-        typer.echo("Run 'njlead run' first to download PDFs from Drive.")
-        raise typer.Exit(code=1) from None
-
     output_dir = Path.cwd() / "output"
 
-    result = do_find(input_dir, output_dir)
+    # Drive exact check (no download, no cost)
+    drive_files: list[dict] = []
+    if not skip_drive:
+        folder_id = os.environ.get("GDRIVE_INPUT_FOLDER_ID", "")
+        if folder_id:
+            try:
+                from njlead.drive import list_drive_pdfs
+                typer.echo("Listing Drive input folder...")
+                drive_files = list_drive_pdfs(folder_id)
+                typer.echo(f"  Found {len(drive_files)} PDFs on Drive")
+            except Exception as e:
+                typer.echo(f"  Drive listing failed: {e}", err=True)
+                typer.echo("  Falling back to local-only check.")
+        else:
+            typer.echo("  GDRIVE_INPUT_FOLDER_ID not set — skipping Drive check.")
 
-    typer.echo("")
-    typer.echo("=" * 40)
-    typer.echo(f"  Files scanned:     {result['total_files']}")
-    typer.echo(f"  Exact dup groups:  {result['exact_groups']}")
-    typer.echo(f"  Auto-excluded:     {result['exact_excluded']}")
-    typer.echo(f"  Text-similar:      {result['text_similar_pairs']}  (review in report)")
-    typer.echo(f"  DB overlap:        {result['db_overlap_pairs']}  (review in report)")
+    # If we have Drive files, use the full workflow
+    if drive_files:
+        local_dir = input_dir if input_dir.exists() else None
+        result = find_all_duplicates(drive_files, local_dir, output_dir)
+        typer.echo("")
+        typer.echo("=" * 40)
+        typer.echo(f"  Drive files:       {result['drive_files']}")
+        typer.echo(f"  Drive dup groups:  {result['drive_exact_groups']}")
+        typer.echo(f"  Drive excluded:    {result['drive_exact_excluded']}")
+        if result["local_files"] > 0:
+            typer.echo(f"  Local files:       {result['local_files']}")
+            typer.echo(f"  Local dup groups:  {result['exact_groups']}")
+            typer.echo(f"  Text-similar:      {result['text_similar_pairs']}  (review in report)")
+            typer.echo(f"  DB overlap:        {result['db_overlap_pairs']}  (review in report)")
+        else:
+            typer.echo("  (no local files — run 'njlead run --download-only' to sync)")
+        total_excluded = result["drive_exact_excluded"] + result["exact_excluded"]
+    else:
+        # Local-only fallback
+        if not input_dir.exists():
+            typer.echo(f"Input folder not found: {input_dir}", err=True)
+            typer.echo("Run 'njlead run --download-only' first to download PDFs.")
+            raise typer.Exit(code=1) from None
+        result = do_find_local(input_dir, output_dir)
+        typer.echo("")
+        typer.echo("=" * 40)
+        typer.echo(f"  Files scanned:     {result['total_files']}")
+        typer.echo(f"  Exact dup groups:  {result['exact_groups']}")
+        typer.echo(f"  Auto-excluded:     {result['exact_excluded']}")
+        typer.echo(f"  Text-similar:      {result['text_similar_pairs']}  (review in report)")
+        typer.echo(f"  DB overlap:        {result['db_overlap_pairs']}  (review in report)")
+        total_excluded = result["exact_excluded"]
+
     typer.echo("=" * 40)
     typer.echo("  Report: output/duplicates_report.csv")
-    if result['exact_excluded'] > 0:
-        typer.echo(f"  Exclude: exclude.txt ({result['exact_excluded']} files)")
+    if total_excluded > 0:
+        typer.echo(f"  Exclude: exclude.txt ({total_excluded} files)")
