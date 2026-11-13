@@ -147,6 +147,20 @@ def _ingest_one(session: Session, path: Path) -> str:
 # Folder walk — the public entry point
 # ---------------------------------------------------------------------------
 
+def _load_exclude_list() -> set[str]:
+    """Load filenames from exclude.txt (one per line, written by find-duplicates)."""
+    exclude_path = Path.cwd() / "exclude.txt"
+    if not exclude_path.exists():
+        return set()
+    names: set[str] = set()
+    for line in exclude_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            # Could be a full relative path or just a filename
+            names.add(Path(line).name)
+    return names
+
+
 def ingest_folder(folder: Path, limit: int | None = None) -> dict[str, int]:
     """
     Walk a folder recursively and ingest every PDF file found.
@@ -164,6 +178,7 @@ def ingest_folder(folder: Path, limit: int | None = None) -> dict[str, int]:
     the caller aborts the run with setup instructions.
     """
     counts = {"ingested": 0, "skipped": 0, "failed": 0}
+    excluded = _load_exclude_list()
 
     # Find all PDF files (case-insensitive on Windows)
     pdf_files = sorted(folder.rglob("*.pdf")) + sorted(folder.rglob("*.PDF"))
@@ -174,6 +189,10 @@ def ingest_folder(folder: Path, limit: int | None = None) -> dict[str, int]:
         resolved = p.resolve()
         if resolved not in seen_paths:
             seen_paths.add(resolved)
+            if p.name in excluded:
+                _log.info("Excluding %s (listed in exclude.txt)", p.name)
+                counts["skipped"] += 1
+                continue
             unique_pdfs.append(p)
 
     # Apply the --limit cap after dedup so "limit=3" always means 3 real files.

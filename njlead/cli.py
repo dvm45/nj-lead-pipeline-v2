@@ -61,9 +61,9 @@ def run(
     """
     Run the full pipeline in one step.
 
-    Downloads PDFs from Google Drive, ingests them, exports to CSV,
-    merges into master.csv on Drive, and moves processed PDFs to the
-    Processed subfolder. Uses a fresh database for each run.
+    Downloads PDFs from Google Drive (skipping files already cached locally),
+    ingests new files into the persistent leads.db, exports master.csv and
+    issues.csv to the output/ folder, and writes a run summary.
 
     For local debugging, use --local <folder> to skip Drive entirely.
     """
@@ -103,9 +103,11 @@ def run(
     typer.echo(f"  Ingested:    {summary.get('ingested', 0)}")
     typer.echo(f"  Skipped:     {summary.get('skipped', 0)}")
     typer.echo(f"  Failed:      {summary.get('failed', 0)}")
-    typer.echo(f"  CSV rows:    {summary.get('master_rows', summary.get('rows_exported', 0))}")
-    typer.echo(f"  Issues:      {summary.get('issues_rows', summary.get('issues_exported', 0))}")
+    typer.echo(f"  CSV rows:    {summary.get('rows_exported', 0)}")
+    typer.echo(f"  Duplicates:  {summary.get('duplicates_removed', 0)}")
+    typer.echo(f"  Issues:      {summary.get('issues_exported', 0)}")
     typer.echo("=" * 40)
+    typer.echo("  Output:      output/master.csv")
 
 
 # ---------------------------------------------------------------------------
@@ -397,8 +399,10 @@ def export(
     from njlead.export.writer import export_to_csv
 
     try:
-        output_path = export_to_csv(output_dir=output_dir)
+        output_path, duplicates_removed = export_to_csv(output_dir=output_dir)
         typer.echo(f"Exported: {output_path.resolve()}")
+        if duplicates_removed:
+            typer.echo(f"  ({duplicates_removed} duplicate rows removed)")
         typer.echo("Open the CSV in Excel or any spreadsheet app to review the data.")
 
         # Surface the unmatched-schools log if the export wrote one.
@@ -414,3 +418,57 @@ def export(
     except RuntimeError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(code=1) from None
+
+
+# ---------------------------------------------------------------------------
+# njlead find-duplicates
+# ---------------------------------------------------------------------------
+
+@app.command(name="find-duplicates")
+def find_duplicates(
+    input_dir: Path = typer.Option(
+        None,
+        "--input-dir", "-i",
+        help="Folder to scan for duplicates (default: input_pdfs/).",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+) -> None:
+    """
+    Scan downloaded PDFs for duplicates. No Bedrock calls — runs locally.
+
+    Detects three kinds of duplicates:
+      1. Exact: identical files with different names (MD5 match)
+      2. Text-similar: ≥90% extracted text overlap
+      3. DB overlap: ≥80% shared (sample_id, value) rows in leads.db
+
+    Writes output/duplicates_report.csv and auto-generates exclude.txt
+    for exact duplicates. The ingest command reads exclude.txt and skips
+    listed files.
+    """
+    from njlead.duplicates import find_duplicates as do_find
+
+    if input_dir is None:
+        input_dir = Path.cwd() / "input_pdfs"
+    if not input_dir.exists():
+        typer.echo(f"Input folder not found: {input_dir}", err=True)
+        typer.echo("Run 'njlead run' first to download PDFs from Drive.")
+        raise typer.Exit(code=1) from None
+
+    output_dir = Path.cwd() / "output"
+
+    result = do_find(input_dir, output_dir)
+
+    typer.echo("")
+    typer.echo("=" * 40)
+    typer.echo(f"  Files scanned:     {result['total_files']}")
+    typer.echo(f"  Exact dup groups:  {result['exact_groups']}")
+    typer.echo(f"  Auto-excluded:     {result['exact_excluded']}")
+    typer.echo(f"  Text-similar:      {result['text_similar_pairs']}  (review in report)")
+    typer.echo(f"  DB overlap:        {result['db_overlap_pairs']}  (review in report)")
+    typer.echo("=" * 40)
+    typer.echo("  Report: output/duplicates_report.csv")
+    if result['exact_excluded'] > 0:
+        typer.echo(f"  Exclude: exclude.txt ({result['exact_excluded']} files)")
