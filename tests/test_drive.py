@@ -1,6 +1,6 @@
 """Tests for Drive integration with the Google client mocked."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,14 +30,16 @@ def test_list_pdfs_preserves_subfolder_path(mock_service):
     root_response = {
         "files": [
             {"id": "folder1", "name": "Passaic County", "mimeType": "application/vnd.google-apps.folder"},
-            {"id": "file1", "name": "root_report.pdf", "mimeType": "application/pdf"},
+            {"id": "file1", "name": "root_report.pdf", "mimeType": "application/pdf",
+             "md5Checksum": "abc123", "size": "1000"},
         ],
         "nextPageToken": None,
     }
     # Subfolder contains a PDF
     sub_response = {
         "files": [
-            {"id": "file2", "name": "sub_report.pdf", "mimeType": "application/pdf"},
+            {"id": "file2", "name": "sub_report.pdf", "mimeType": "application/pdf",
+             "md5Checksum": "def456", "size": "2000"},
         ],
         "nextPageToken": None,
     }
@@ -63,14 +65,15 @@ def test_list_pdfs_preserves_subfolder_path(mock_service):
     assert "Passaic County/sub_report.pdf" in paths
 
 
-def test_list_pdfs_skips_processed_folder(mock_service):
-    """The Processed subfolder should be skipped when skip_folder_names includes it."""
+def test_list_pdfs_skips_folder(mock_service):
+    """Folders in skip_folder_names should be excluded."""
     from njlead.drive import _list_pdfs_recursive
 
     root_response = {
         "files": [
             {"id": "proc_folder", "name": "Processed", "mimeType": "application/vnd.google-apps.folder"},
-            {"id": "file1", "name": "new_report.pdf", "mimeType": "application/pdf"},
+            {"id": "file1", "name": "new_report.pdf", "mimeType": "application/pdf",
+             "md5Checksum": "abc", "size": "500"},
         ],
         "nextPageToken": None,
     }
@@ -89,37 +92,23 @@ def test_list_pdfs_skips_processed_folder(mock_service):
     assert results[0]["name"] == "new_report.pdf"
 
 
-def test_move_to_processed_preserves_structure():
-    """move_to_processed should create subfolder structure under Processed."""
-    from njlead.drive import move_to_processed
+def test_md5_fields_requested(mock_service):
+    """The files().list call should request md5Checksum for checksum-based skip."""
+    from njlead.drive import _list_children
 
-    file_info = {
-        "id": "file123",
-        "relative_path": "Passaic County/report.pdf",
-        "parent_folder_id": "county_folder",
-    }
+    mock_list = MagicMock()
+    mock_list.execute.return_value = {"files": [], "nextPageToken": None}
+    mock_service.files().list.return_value = mock_list
 
-    with patch("njlead.drive._get_service") as mock_get:
-        service = MagicMock()
-        mock_get.return_value = service
+    _list_children(mock_service, "folder123")
 
-        # _find_or_create_subfolder calls files().list then files().create
-        # First call: find "Processed" folder -> return existing
-        # Second call: find "Passaic County" under Processed -> create new
-        list_mock = MagicMock()
-        service.files().list.return_value = list_mock
+    # Check that the fields parameter includes md5Checksum
+    call_kwargs = mock_service.files().list.call_args
+    fields = call_kwargs.kwargs.get("fields", "") if call_kwargs.kwargs else ""
+    assert "md5Checksum" in fields
 
-        # Track folder creation order
-        folder_ids = iter(["processed_id", "county_processed_id"])
-        def list_execute(*args, **kwargs):
-            return {"files": [{"id": next(folder_ids)}]}
-        list_mock.execute.side_effect = list_execute
 
-        update_mock = MagicMock()
-        update_mock.execute.return_value = {}
-        service.files().update.return_value = update_mock
-
-        move_to_processed("input_folder_id", file_info)
-
-        # The file should have been moved
-        service.files().update.assert_called()
+def test_readonly_scope():
+    """The auth scope should be read-only."""
+    from njlead.drive import SCOPES
+    assert SCOPES == ["https://www.googleapis.com/auth/drive.readonly"]
