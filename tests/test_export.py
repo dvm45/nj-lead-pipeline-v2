@@ -8,7 +8,7 @@ from njlead.export.writer import CSV_COLUMNS
 REQUIRED_COLUMNS = [
     "county", "district", "school_name", "address", "coordinates",
     "sample_id", "sample_location", "fixture_type", "draw_type",
-    "sample_date", "year", "report_year",
+    "sample_date", "year", "report_year", "year_source",
     "lead_concentration_ppb", "confidence", "source_page", "source_file",
 ]
 
@@ -23,7 +23,7 @@ def test_column_order():
 
 
 def test_column_count():
-    assert len(CSV_COLUMNS) == 16
+    assert len(CSV_COLUMNS) == 17
 
 
 # --- Analyte normalization ---
@@ -78,3 +78,12 @@ def test_county_from_path():
     assert _county_from_path("C:/data/Passaic County/report.pdf") == "Passaic"
     assert _county_from_path("C:\\data\\Atlantic County\\sub\\file.pdf") == "Atlantic"
     assert _county_from_path("C:/data/report.pdf") == ""
+
+
+# --- Dedup keys ---
+
+def test_dedup_keys_defined():
+    from njlead.export.writer import _DEDUP_KEYS
+    assert "school_name" in _DEDUP_KEYS
+    assert "sample_id" in _DEDUP_KEYS
+    assert "lead_concentration_ppb" in _DEDUP_KEYS

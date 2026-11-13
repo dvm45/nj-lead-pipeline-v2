@@ -205,14 +205,22 @@ def download_edge_geocodes(year: int, dest_dir: Path) -> Path:
     lat_idx = col("LAT")
     lon_idx = col("LON")
     state_idx = col("STATE") if "STATE" in header else col("LSTATE")
+    # NMCNTY contains the county name — CCD dropped this field in 2023-24
+    # but the EDGE geocode file still has it
+    nmcnty_idx = header.index("NMCNTY") if "NMCNTY" in header else None
 
     out_path = dest_dir / f"edge_nj_{year}.csv"
     kept = 0
+    required_indices = [ncessch_idx, lat_idx, lon_idx, state_idx]
+    if nmcnty_idx is not None:
+        required_indices.append(nmcnty_idx)
+    max_required = max(required_indices)
+
     with open(out_path, "w", newline="", encoding="utf-8") as out:
         writer = csv.writer(out)
-        writer.writerow(["NCESSCH", "LAT", "LON"])
+        writer.writerow(["NCESSCH", "LAT", "LON", "NMCNTY"])
         for row in rows:
-            if row is None or len(row) <= max(ncessch_idx, lat_idx, lon_idx, state_idx):
+            if row is None or len(row) <= max_required:
                 continue
             state = str(row[state_idx] or "").strip().upper()
             if state != "NJ":
@@ -220,9 +228,10 @@ def download_edge_geocodes(year: int, dest_dir: Path) -> Path:
             ncessch = str(row[ncessch_idx] or "").strip()
             lat = row[lat_idx]
             lon = row[lon_idx]
+            county = str(row[nmcnty_idx] or "").strip() if nmcnty_idx is not None else ""
             if not ncessch or lat is None or lon is None:
                 continue
-            writer.writerow([ncessch, lat, lon])
+            writer.writerow([ncessch, lat, lon, county])
             kept += 1
 
     wb.close()
@@ -245,11 +254,15 @@ def build_lookup(ccd_csv: Path, edge_csv: Path, out_path: Path) -> Path:
       nces_id, school_name, district_name,
       county, address, latitude, longitude
     """
-    # Step 1: load EDGE coords into a dict for fast lookup by NCES ID
-    coords: dict[str, tuple[str, str]] = {}
+    # Step 1: load EDGE data (coords + county) into a dict for fast lookup
+    edge_data: dict[str, dict] = {}
     with open(edge_csv, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            coords[row["NCESSCH"]] = (row["LAT"], row["LON"])
+            edge_data[row["NCESSCH"]] = {
+                "lat": row["LAT"],
+                "lon": row["LON"],
+                "county": row.get("NMCNTY", ""),
+            }
 
     # Step 2: stream the CCD directory and write the joined output
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,7 +282,12 @@ def build_lookup(ccd_csv: Path, edge_csv: Path, out_path: Path) -> Path:
         joined = 0
         for row in reader:
             nces_id = row["NCESSCH"].strip()
-            lat, lon = coords.get(nces_id, ("", ""))
+            edge = edge_data.get(nces_id, {})
+            lat = edge.get("lat", "")
+            lon = edge.get("lon", "")
+
+            # County: prefer EDGE (always populated), fall back to CCD
+            county = edge.get("county", "") or row.get("NMCNTY", "").strip()
 
             # Concatenate address pieces, skipping blanks
             address_parts = [
@@ -285,7 +303,7 @@ def build_lookup(ccd_csv: Path, edge_csv: Path, out_path: Path) -> Path:
                 "nces_id": nces_id,
                 "school_name": row.get("SCH_NAME", "").strip(),
                 "district_name": row.get("LEA_NAME", "").strip(),
-                "county": row.get("NMCNTY", "").strip(),
+                "county": county,
                 "address": address,
                 "latitude": lat,
                 "longitude": lon,

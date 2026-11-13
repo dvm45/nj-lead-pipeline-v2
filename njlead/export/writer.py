@@ -23,6 +23,7 @@ Behavior on missing data:
 """
 
 import csv
+import logging
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,8 @@ from njlead.db.models import Document, Measurement, Sample, School
 from njlead.db.session import get_session
 from njlead.reference import LATEST_REFERENCE_YEAR
 from njlead.reference.matcher import SchoolMatch, SchoolMatcher
+
+_log = logging.getLogger(__name__)
 
 # Gold-standard output columns, in order
 CSV_COLUMNS = [
@@ -48,11 +51,18 @@ CSV_COLUMNS = [
     "sample_date",
     "year",
     "report_year",
+    "year_source",
     "lead_concentration_ppb",
     "confidence",
     "source_page",
     "source_file",
 ]
+
+# Columns used to detect duplicate rows
+_DEDUP_KEYS = (
+    "school_name", "sample_id", "sample_location",
+    "draw_type", "sample_date", "lead_concentration_ppb",
+)
 
 
 def _county_from_path(file_path: str) -> str:
@@ -171,6 +181,10 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                 "Run 'njlead ingest <folder>' first."
             )
 
+        # Dedup tracking
+        seen: set[tuple] = set()
+        duplicates_removed = 0
+
         with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=CSV_COLUMNS)
             writer.writeheader()
@@ -180,8 +194,7 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                 school = sample.school
                 doc = sample.document
 
-                # Match the parsed school to its NCES record. If we never
-                # parsed a school name from the PDF, we can't even try.
+                # Match the parsed school to its NCES record
                 match: SchoolMatch | None = None
                 if school is not None:
                     match = matcher.match(school.name, school.district)
@@ -190,15 +203,16 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                         unmatched[key]["count"] += 1
                         unmatched[key]["files"].add(doc.file_name)
 
-                # Use the matched canonical district when possible, else the
-                # one parsed from the PDF (so blanks don't propagate).
+                # Use the matched canonical district when possible
                 district_out = (match.district_name if match else (school.district if school else "")) or ""
                 school_name_out = (match.school_name if match else (school.name if school else "")) or ""
 
                 # Year: prefer sample date, fall back to test_year
                 year_out = sample.test_year
+                year_source = "test_year" if year_out else None
                 if year_out is None and sample.sample_date is not None:
                     year_out = sample.sample_date.year
+                    year_source = "sample_date"
 
                 # Report year (from the document, not sample-level)
                 report_year_out = getattr(doc, "report_year", None)
@@ -206,6 +220,7 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                 # Year fallback: if sample year is blank, use report year
                 if year_out is None and report_year_out is not None:
                     year_out = report_year_out
+                    year_source = "report_year"
 
                 county_out = match.county if match else ""
                 if not county_out:
@@ -216,7 +231,7 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                 if not address_out:
                     address_out = getattr(sample, "school_address", "") or ""
 
-                writer.writerow({
+                row = {
                     "county": county_out,
                     "district": district_out,
                     "school_name": school_name_out,
@@ -229,13 +244,26 @@ def export_to_csv(output_dir: Path | None = None) -> Path:
                     "sample_date": sample.sample_date.isoformat() if sample.sample_date else "",
                     "year": year_out if year_out is not None else "",
                     "report_year": report_year_out if report_year_out is not None else "",
+                    "year_source": year_source or "",
                     "lead_concentration_ppb": m.result_ppb,
                     "confidence": m.confidence if m.confidence is not None else "",
                     "source_page": m.source_page if m.source_page is not None else "",
                     "source_file": doc.file_name,
-                })
+                }
+
+                # Deduplicate on key columns
+                dedup_key = tuple(str(row[k]) for k in _DEDUP_KEYS)
+                if dedup_key in seen:
+                    duplicates_removed += 1
+                    continue
+                seen.add(dedup_key)
+
+                writer.writerow(row)
+
+    if duplicates_removed > 0:
+        _log.info("Removed %d duplicate rows from export", duplicates_removed)
 
     # --- Step 4: write the unmatched log -------------------------------
     _write_unmatched_log(unmatched, unmatched_path)
 
-    return output_path
+    return output_path, duplicates_removed
