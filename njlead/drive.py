@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+_MAX_RETRIES = 3
+_RETRY_DELAY = 5  # seconds between retries for transient 5xx errors
 
 
 # ---------------------------------------------------------------------------
@@ -51,19 +55,35 @@ def _get_service():
 # Folder listing helpers
 # ---------------------------------------------------------------------------
 
+def _execute_with_retry(request):
+    """Execute a Google API request with retry on transient 5xx errors."""
+    from googleapiclient.errors import HttpError
+
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return request.execute()
+        except HttpError as e:
+            if e.resp.status >= 500 and attempt < _MAX_RETRIES - 1:
+                _log.warning("Drive API %d error (attempt %d/%d), retrying in %ds...",
+                             e.resp.status, attempt + 1, _MAX_RETRIES, _RETRY_DELAY)
+                time.sleep(_RETRY_DELAY)
+            else:
+                raise
+
+
 def _list_children(service, folder_id: str) -> list[dict]:
     """List all non-trashed children (files + folders) of a Drive folder."""
     items: list[dict] = []
     page_token = None
     while True:
-        resp = service.files().list(
+        resp = _execute_with_retry(service.files().list(
             q=f"'{folder_id}' in parents and trashed=false",
             fields="nextPageToken, files(id, name, mimeType)",
             pageSize=1000,
             pageToken=page_token,
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
-        ).execute()
+        ))
         items.extend(resp.get("files", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
