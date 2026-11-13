@@ -4,12 +4,49 @@ Extracts structured data from NJ school drinking water lead testing PDFs and sto
 
 ---
 
+## For lab members (quick start)
+
+You need: Windows 10/11, Python 3.11+, and the two credential files Dan sends you (`.env` and `service-account.json`).
+
+### 1. Install Python
+
+Download from [python.org](https://www.python.org/downloads/). **Check "Add Python to PATH"** during install.
+
+### 2. Download and set up
+
+1. Download the repo ZIP and extract it (or `git clone`)
+2. Place `.env` in the project folder (right next to `setup.bat`)
+3. Create a `credentials/` folder and place `service-account.json` inside it
+4. Double-click **`setup.bat`** — it installs everything and downloads reference data
+
+### 3. Run the pipeline
+
+Double-click **`run.bat`**. It downloads new PDFs from Drive, processes them, uploads results, and moves processed files to the Processed folder. A summary prints at the end — keep the window open to check for errors.
+
+### 4. Find your results
+
+- **`master.csv`** in the shared Google Drive output folder — all lead results
+- **`issues.csv`** — rows that failed validation or were flagged for review
+- **`last_run.txt`** — run summary (files processed, rows written, failures)
+
+---
+
 ## What it does
 
-1. **`njlead init`** — creates the database (run once before anything else).
-2. **`njlead ingest <folder>`** — finds every PDF in a folder, runs each through the 3-agent pipeline, and writes validated results to `leads.db`.
-3. **`njlead refresh-reference`** — downloads NCES school metadata (county, address, coordinates) for every NJ public school. Run once before your first export, then yearly.
-4. **`njlead export`** — joins the ingested data with NCES metadata and writes a CSV file you can open in Excel.
+1. **`njlead run`** — the main command. Downloads PDFs from Google Drive, ingests them, exports to CSV, merges into `master.csv` on Drive, and moves processed PDFs to a `Processed` subfolder.
+2. **`njlead init`** — creates the database (run once before anything else).
+3. **`njlead ingest <folder>`** — finds every PDF in a folder and runs each through the 3-agent pipeline.
+4. **`njlead refresh-reference`** — downloads NCES school metadata (county, address, coordinates) for every NJ public school.
+5. **`njlead export`** — joins the ingested data with NCES metadata and writes a CSV file.
+6. **`njlead check-llm`** — reports LLM configuration status (spends nothing).
+
+### Flags for `njlead run`
+
+| Flag | Purpose |
+|---|---|
+| `--full-refresh` | Reprocess ALL PDFs (including already-processed) and rebuild master.csv from scratch |
+| `--limit N` | Only process the first N files (cheap test run) |
+| `--local <folder>` | Skip Drive, process a local folder instead (debugging) |
 
 ---
 
@@ -48,121 +85,62 @@ Rows that fail any check are logged to the `issues` table for human review — n
 
 ---
 
-## Setup (Windows)
+## Developer setup
 
-### Step 1 — Python 3.11+
+### Prerequisites
 
-```
-python --version
-```
+- Python 3.11+
+- AWS Bedrock credentials (or Anthropic API key)
+- Google service account JSON with Drive access
 
-If not 3.11 or higher, download from [python.org](https://www.python.org/downloads/) and check "Add Python to PATH" during install.
-
-### Step 2 — Open a terminal in the project folder
-
-Right-click the `nj_lead_pipeline_v2` folder → "Open in Terminal"
-
-### Step 3 — Create and activate a virtual environment
+### Install
 
 ```
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate        # Windows
+pip install -e ".[dev]"       # includes pytest and ruff
 ```
 
-Your prompt should show `(.venv)`. You need to activate this every time you open a new terminal.
+### Configure
 
-### Step 4 — Install dependencies
+Copy `.env.example` to `.env` and fill in your credentials. At minimum:
+- `AWS_BEARER_TOKEN_BEDROCK` — your Bedrock long-term API key
+- `GDRIVE_INPUT_FOLDER_ID` and `GDRIVE_OUTPUT_FOLDER_ID` — from the Drive folder URLs
+- Place `service-account.json` at `credentials/service-account.json`
 
-```
-pip install -r requirements.txt
-pip install -e .
-```
-
-### Step 5 — Configure AWS Bedrock credentials
-
-The pipeline calls Claude via AWS Bedrock. You need AWS credentials with Bedrock model access:
+### Verify
 
 ```
-aws configure
+njlead check-llm              # confirms credentials (no API calls)
+njlead refresh-reference      # downloads NCES school data (once)
+njlead run --local data/ --limit 3   # test run on local PDFs
 ```
 
-Or set environment variables:
-```
-set AWS_ACCESS_KEY_ID=your-key
-set AWS_SECRET_ACCESS_KEY=your-secret
-set AWS_REGION=us-east-2
-```
-
-**Alternative: Anthropic direct API.** Set `NJLEAD_LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY=sk-ant-...` in a `.env` file.
-
-### Step 6 — Verify
+### Tests and linting
 
 ```
-njlead --help
-njlead check-llm
+pytest -v                     # 32 tests, all pass
+ruff check njlead/ tests/     # lint
 ```
-
-`check-llm` confirms credentials and SDK are set up. It makes no API calls and costs nothing.
 
 ---
 
-## Usage
-
-### Initialize the database (first time only)
-
-```
-njlead init
-```
-
-### Ingest PDFs
-
-Start with a small trial run:
-
-```
-njlead ingest data/ --limit 3
-```
-
-Then run the full folder:
-
-```
-njlead ingest data/
-```
-
-Output example:
-
-```
-Found 229 PDF file(s) in data/
-  [1/229] Atlantic County report.pdf ... [llm] pages=3 measurements=34
-    [verify] sonnet in=4951 out=347  multi_school=False  confidence=0.97
-  ingested
-  [2/229] Bridgeton BOE Summary.pdf ... [filter] dropped 2 noise page(s)
-    [llm] pages=2 measurements=110  school='Bridgeton Public Schools'
-    [verify] sonnet in=5969 out=543  multi_school=True  attribution_ok=True
-  ingested
-  ...
-```
-
-### Export to CSV
-
-```
-njlead export
-```
-
-Writes `export_<timestamp>.csv` with columns:
+## Output columns
 
 | Column | Source |
 |---|---|
-| `county` | NCES metadata |
+| `county` | NCES metadata (falls back to folder path) |
 | `district` | NCES canonical name (falls back to PDF) |
 | `school_name` | NCES canonical name (falls back to PDF) |
-| `address` | NCES metadata |
+| `address` | NCES metadata (falls back to PDF-extracted address) |
 | `coordinates` | NCES lat/long |
 | `sample_id` | Extracted from PDF |
 | `sample_location` | Extracted from PDF |
 | `fixture_type` | Extracted from PDF (e.g. "Sink", "Water Cooler") |
 | `draw_type` | `first_draw`, `flush`, or blank |
 | `sample_date` | Extracted from PDF, ISO format |
-| `year` | Year from date or report |
+| `year` | Year from sample date or test_year (falls back to report_year) |
+| `report_year` | The year the report was issued (from cover/header) |
 | `lead_concentration_ppb` | Lead result in ppb |
 | `confidence` | Model's per-row confidence (0–1) |
 | `source_page` | Page number in the source PDF |
@@ -207,9 +185,7 @@ The pipeline uses three Claude models at different price points:
 | Extractor | Opus 4.6 | ~$0.05–0.50 depending on page count |
 | Verifier | Sonnet 4.6 | ~$0.01–0.05 (skipped for simple reports) |
 
-Prompt caching reduces repeated system prompt costs by ~90% within a batch run. SHA-256 dedup means re-running the same folder doesn't re-spend on files already in the database.
-
-Use `--limit N` for a trial run before committing to a large folder.
+Prompt caching reduces repeated system prompt costs by ~90% within a batch run. Use `--limit N` for a trial run before committing to a large folder.
 
 ---
 
@@ -231,32 +207,38 @@ Settings in `.env` (all optional — safe defaults are used):
 
 ```
 nj_lead_pipeline_v2/
-├── requirements.txt
+├── requirements.txt            <- pinned lock file from working install
 ├── pyproject.toml              <- makes `njlead` a CLI command
 ├── .env.example                <- credential template (copy to .env)
+├── setup.bat                   <- one-click setup for lab members
+├── run.bat                     <- one-click run for lab members
+├── CLAUDE.md                   <- developer context for Claude Code
+├── CHANGELOG.md
 ├── njlead/
-│   ├── cli.py                  <- Typer CLI: init, ingest, check-llm, export
-│   ├── config.py               <- env/.env settings (provider, model, thresholds)
+│   ├── cli.py                  <- Typer CLI commands
+│   ├── config.py               <- env/.env settings
+│   ├── runner.py               <- `njlead run` orchestrator
+│   ├── drive.py                <- Google Drive integration
+│   ├── logging_setup.py        <- logging config
 │   ├── db/
 │   │   ├── models.py           <- SQLAlchemy ORM (6 tables)
 │   │   └── session.py          <- engine + Session factory
 │   ├── ingest/
 │   │   ├── loader.py           <- folder walk + per-file orchestration
-│   │   ├── extractor.py        <- PyMuPDF text extraction, page-by-page
+│   │   ├── extractor.py        <- PyMuPDF text extraction
 │   │   ├── page_classifier.py  <- Agent 1: Haiku page classifier
-│   │   ├── schema.py           <- Pydantic extraction schema (the "blank form")
+│   │   ├── schema.py           <- Pydantic extraction schema
 │   │   ├── llm_extractor.py    <- Agent 2: Opus extraction client
-│   │   ├── verifier.py         <- Agent 3: Sonnet verification agent
+│   │   ├── verifier.py         <- Agent 3: Sonnet verification
 │   │   ├── validation.py       <- Rule-based QA/QC gate (5 checks)
-│   │   └── llm_pipeline.py     <- orchestrates classify -> extract -> verify -> validate -> write
+│   │   └── llm_pipeline.py     <- orchestrates the full pipeline
 │   ├── reference/
 │   │   ├── downloader.py       <- fetches NCES CCD + EDGE files
-│   │   └── matcher.py          <- fuzzy school-name matcher (rapidfuzz)
+│   │   └── matcher.py          <- fuzzy school-name matcher
 │   └── export/
 │       └── writer.py           <- CSV export with NCES join
+├── tests/                      <- pytest tests (32 tests)
 └── data/
     ├── (your PDFs here)
     └── reference/              <- cached NCES files
-        ├── nj_schools_<YEAR>.csv
-        └── unmatched_schools.csv
 ```
