@@ -209,7 +209,8 @@ def _get_verifier_client():
     if config.LLM_PROVIDER == "bedrock":
         try:
             client = anthropic.AnthropicBedrock(aws_region=config.AWS_REGION)
-        except Exception:
+        except Exception as e:
+            _log.debug("Failed to create Sonnet Bedrock client: %s", e)
             return None, None
         return client, _SONNET_MODEL_BEDROCK
     else:

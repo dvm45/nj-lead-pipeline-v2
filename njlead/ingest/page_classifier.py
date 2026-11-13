@@ -180,7 +180,8 @@ def _get_classifier_client():
     if config.LLM_PROVIDER == "bedrock":
         try:
             client = anthropic.AnthropicBedrock(aws_region=config.AWS_REGION)
-        except Exception:
+        except Exception as e:
+            _log.debug("Failed to create Haiku Bedrock client: %s", e)
             return None, None
         return client, _HAIKU_MODEL_BEDROCK
     else:
