@@ -57,6 +57,11 @@ def run(
         dir_okay=True,
         resolve_path=True,
     ),
+    random: bool = typer.Option(
+        False,
+        "--random",
+        help="When used with --limit, pick a random sample instead of alphabetical order.",
+    ),
     download_only: bool = typer.Option(
         False,
         "--download-only",
@@ -96,6 +101,7 @@ def run(
         summary = run_pipeline(
             full_refresh=full_refresh,
             limit=limit,
+            random_sample=random,
             local_folder=local,
         )
     except FileNotFoundError as e:

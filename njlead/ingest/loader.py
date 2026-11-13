@@ -161,13 +161,17 @@ def _load_exclude_list() -> set[str]:
     return names
 
 
-def ingest_folder(folder: Path, limit: int | None = None) -> dict[str, int]:
+def ingest_folder(
+    folder: Path,
+    limit: int | None = None,
+    random_sample: bool = False,
+) -> dict[str, int]:
     """
     Walk a folder recursively and ingest every PDF file found.
 
-    limit:  process at most this many files. Handy for a cheap first run
-            (e.g. `njlead ingest data/ --limit 3`) before committing to the
-            full set.
+    limit:          process at most this many files.
+    random_sample:  if True and limit is set, pick a random sample instead
+                    of taking the first N alphabetically.
 
     Returns a summary dict:
       { 'ingested': N, 'skipped': N, 'failed': N, 'total': N }
@@ -197,7 +201,11 @@ def ingest_folder(folder: Path, limit: int | None = None) -> dict[str, int]:
 
     # Apply the --limit cap after dedup so "limit=3" always means 3 real files.
     if limit is not None and limit > 0:
-        unique_pdfs = unique_pdfs[:limit]
+        if random_sample and len(unique_pdfs) > limit:
+            import random
+            unique_pdfs = random.sample(unique_pdfs, limit)
+        else:
+            unique_pdfs = unique_pdfs[:limit]
 
     total = len(unique_pdfs)
     if total == 0:

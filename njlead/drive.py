@@ -222,14 +222,26 @@ def download_new_pdfs(
                 skipped_count += 1
                 continue
 
-        # Download the file
+        # Download the file (retry on transient network errors)
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        request = service.files().get_media(fileId=f["id"])
-        with open(local_path, "wb") as fh:
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
+        for attempt in range(_MAX_RETRIES):
+            try:
+                request = service.files().get_media(fileId=f["id"])
+                with open(local_path, "wb") as fh:
+                    downloader = MediaIoBaseDownload(fh, request)
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+                break
+            except (ConnectionError, OSError) as e:
+                if attempt < _MAX_RETRIES - 1:
+                    _log.warning("Download failed for %s (attempt %d/%d): %s — retrying in %ds...",
+                                 f["relative_path"], attempt + 1, _MAX_RETRIES, e, _RETRY_DELAY)
+                    time.sleep(_RETRY_DELAY)
+                else:
+                    _log.error("Download failed for %s after %d attempts: %s",
+                               f["relative_path"], _MAX_RETRIES, e)
+                    raise
 
         f["skipped"] = False
         all_files.append(f)

@@ -50,6 +50,7 @@ def run_pipeline(
     *,
     full_refresh: bool = False,
     limit: int | None = None,
+    random_sample: bool = False,
     local_folder: Path | None = None,
 ) -> dict:
     """
@@ -123,7 +124,7 @@ def run_pipeline(
         init_db(db_path)
         _log.info("Ingesting into database: %s", db_path.name)
 
-        counts = ingest_folder(input_dir, limit=limit)
+        counts = ingest_folder(input_dir, limit=limit, random_sample=random_sample)
         summary.update(counts)
 
         # --- Step 4: Export to output/ ---
