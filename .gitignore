@@ -24,9 +24,10 @@ data/
 .claude/
 Claude/
 
-# Web UI local staging
+# Pipeline I/O (all local, never committed)
 input_pdfs/
-output_csvs/
+output/
+exclude.txt
 credentials/
 
 # OS noise

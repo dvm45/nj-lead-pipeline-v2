@@ -61,9 +61,9 @@ ANTHROPIC_MODEL: str = os.environ.get("NJLEAD_ANTHROPIC_MODEL", "claude-opus-4-6
 # AWS region where you've been granted Bedrock model access.
 AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-2")
 
-# Bedrock's ID for Claude Opus 4.6. The "us." prefix means "US inference
+# Bedrock's ID for the extractor model. The "us." prefix means "US inference
 # profile" — Bedrock routes across US regions for capacity. Override via
-# NJLEAD_BEDROCK_MODEL_ID in .env if needed.
+# NJLEAD_BEDROCK_MODEL_ID in .env to switch between Opus and Sonnet.
 BEDROCK_MODEL_ID: str = os.environ.get(
     "NJLEAD_BEDROCK_MODEL_ID",
     "us.anthropic.claude-opus-4-6-v1",  # cross-region inference profile

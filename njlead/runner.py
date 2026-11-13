@@ -3,15 +3,12 @@ Run orchestrator — the engine behind `njlead run`.
 
 Orchestrates the full pipeline in one step:
   1. Download PDFs from Google Drive (or use a local folder)
-  2. Ingest into a fresh leads.db
-  3. Export to CSV
-  4. Merge into master.csv and issues.csv on Drive
-  5. Move processed PDFs to the Processed subfolder
-  6. Write a last_run.txt summary to Drive
+  2. Ingest into leads.db (persistent, SHA-256 dedup skips already-seen files)
+  3. Export to CSV in output/ folder
+  4. Write last_run.txt summary
 
-The Drive Processed folder is the dedup mechanism: PDFs already there
-are skipped unless --full-refresh is set. A fresh local DB is created
-for each run, so reprocessed PDFs always get a clean extraction.
+Drive is input-only — all outputs stay local. The DB is persistent across
+runs so only new/changed PDFs are processed.
 """
 
 from __future__ import annotations
@@ -20,64 +17,33 @@ import csv
 import logging
 import os
 import shutil
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
+# Token costs per million tokens (as of Nov 2026)
+_COST_PER_M_INPUT = {
+    "haiku": 0.80,
+    "opus": 15.00,
+    "sonnet": 3.00,
+}
+_COST_PER_M_OUTPUT = {
+    "haiku": 4.00,
+    "opus": 75.00,
+    "sonnet": 15.00,
+}
 
-def _merge_csv(
-    existing_path: Path | None,
-    new_path: Path,
-    output_path: Path,
-    key_column: str,
-    source_files_this_run: set[str],
-    full_refresh: bool,
-) -> int:
-    """
-    Merge new CSV rows into an existing CSV.
 
-    For incremental runs: remove rows from existing whose key_column value
-    matches any file processed this run, then append all new rows. This
-    replaces old rows for reprocessed files without duplicating.
-
-    For --full-refresh: ignore existing, just use the new rows.
-
-    Returns the total row count in the merged output.
-    """
-    if full_refresh or existing_path is None or not existing_path.exists():
-        # Full refresh or no prior CSV — just use the new file as-is
-        shutil.copy2(new_path, output_path)
-        with open(output_path, encoding="utf-8") as f:
-            return sum(1 for _ in f) - 1  # subtract header
-
-    # Read the new CSV header to ensure column alignment
-    with open(new_path, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        new_fieldnames = reader.fieldnames or []
-        new_rows = list(reader)
-
-    # Read existing CSV, dropping rows whose source_file was reprocessed
-    kept_rows: list[dict] = []
-    with open(existing_path, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row.get(key_column, "") not in source_files_this_run:
-                kept_rows.append(row)
-
-    # Use new fieldnames (they may have added columns since last run)
-    fieldnames = new_fieldnames
-
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in kept_rows:
-            writer.writerow({k: row.get(k, "") for k in fieldnames})
-        for row in new_rows:
-            writer.writerow(row)
-
-    return len(kept_rows) + len(new_rows)
+def _estimate_cost(token_usage: dict) -> float:
+    """Compute estimated dollar cost from per-model token counts."""
+    total = 0.0
+    for model, counts in token_usage.items():
+        inp = counts.get("input", 0)
+        out = counts.get("output", 0)
+        total += inp / 1_000_000 * _COST_PER_M_INPUT.get(model, 10.0)
+        total += out / 1_000_000 * _COST_PER_M_OUTPUT.get(model, 50.0)
+    return total
 
 
 def run_pipeline(
@@ -94,10 +60,12 @@ def run_pipeline(
     from njlead.db.session import init_db
     from njlead.export.writer import export_to_csv
     from njlead.ingest.loader import ingest_folder
+    from njlead.token_tracker import tracker
 
+    tracker.reset()
+    project_root = Path.cwd()
     use_drive = local_folder is None
     input_folder_id = os.environ.get("GDRIVE_INPUT_FOLDER_ID", "")
-    output_folder_id = os.environ.get("GDRIVE_OUTPUT_FOLDER_ID", "")
 
     if use_drive and not input_folder_id:
         raise RuntimeError(
@@ -105,41 +73,34 @@ def run_pipeline(
             "Either set it to use Google Drive, or use --local <folder> "
             "to process a local folder."
         )
-    if use_drive and not output_folder_id:
-        raise RuntimeError(
-            "GDRIVE_OUTPUT_FOLDER_ID is not set in .env.\n"
-            "Set it to the Drive folder where master.csv should go."
-        )
 
-    # Work in a temp directory for this run's local files
-    run_dir = Path(tempfile.mkdtemp(prefix="njlead_run_"))
-    input_dir = run_dir / "input_pdfs"
-    output_dir = run_dir / "output"
-    input_dir.mkdir()
-    output_dir.mkdir()
+    # Persistent local folder for downloaded PDFs (gitignored)
+    input_dir = project_root / "input_pdfs"
+    input_dir.mkdir(exist_ok=True)
+
+    # Output folder for CSVs and run logs
+    output_dir = project_root / "output"
+    output_dir.mkdir(exist_ok=True)
 
     summary: dict = {
         "timestamp": datetime.now(UTC).isoformat(),
         "mode": "full_refresh" if full_refresh else "incremental",
         "use_drive": use_drive,
     }
-    downloaded_files: list[dict] = []
-    processed_file_names: set[str] = set()
 
     try:
         # --- Step 1: Get PDFs ---
         if use_drive:
             from njlead.drive import download_new_pdfs
-            _log.info("Downloading PDFs from Google Drive...")
-            downloaded_files = download_new_pdfs(
-                input_folder_id, input_dir, include_processed=full_refresh,
-            )
-            pdf_count = len(downloaded_files)
-            _log.info("  %d PDF(s) to process", pdf_count)
-            summary["downloaded"] = pdf_count
+            _log.info("Syncing PDFs from Google Drive...")
+            all_drive_files = download_new_pdfs(input_folder_id, input_dir)
+            total_on_drive = len(all_drive_files)
+            downloaded = sum(1 for f in all_drive_files if not f.get("skipped"))
+            summary["drive_total"] = total_on_drive
+            summary["downloaded"] = downloaded
 
-            if pdf_count == 0:
-                _log.info("No new PDFs found. Nothing to do.")
+            if total_on_drive == 0:
+                _log.info("No PDFs found on Drive. Nothing to do.")
                 summary["ingested"] = 0
                 summary["skipped"] = 0
                 summary["failed"] = 0
@@ -148,45 +109,46 @@ def run_pipeline(
             input_dir = local_folder
             summary["local_folder"] = str(local_folder)
 
-        # Apply --limit after download
-        if limit is not None and use_drive and len(downloaded_files) > limit:
-            downloaded_files = downloaded_files[:limit]
-            _log.info("  Limited to %d file(s)", limit)
+        # --- Step 2: Handle --full-refresh (back up existing DB) ---
+        db_path = project_root / "leads.db"
+        if full_refresh and db_path.exists():
+            ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+            backup_path = project_root / f"leads_backup_{ts}.db"
+            shutil.copy2(db_path, backup_path)
+            _log.info("Backed up existing database to %s", backup_path.name)
+            db_path.unlink()
 
-        # --- Step 2: Ingest into a fresh local DB ---
-        db_path = run_dir / "leads.db"
+        # --- Step 3: Ingest into persistent leads.db ---
         os.environ["NJLEAD_DB"] = str(db_path)
         init_db(db_path)
-        _log.info("Ingesting into fresh database: %s", db_path.name)
+        _log.info("Ingesting into database: %s", db_path.name)
 
         counts = ingest_folder(input_dir, limit=limit)
         summary.update(counts)
 
-        # Track which files were processed (for CSV merge dedup)
-        for pdf in input_dir.rglob("*.pdf"):
-            processed_file_names.add(pdf.name)
-        for pdf in input_dir.rglob("*.PDF"):
-            processed_file_names.add(pdf.name)
+        # --- Step 4: Export to output/ ---
+        _log.info("Exporting to CSV...")
+        try:
+            local_csv, duplicates_removed = export_to_csv(output_dir=output_dir)
+            summary["export_path"] = str(local_csv)
+            summary["duplicates_removed"] = duplicates_removed
+            _log.info("  Exported: %s", local_csv.name)
 
-        # --- Step 3: Export to local CSV ---
-        if counts.get("ingested", 0) > 0:
-            _log.info("Exporting to CSV...")
-            try:
-                local_csv = export_to_csv(output_dir=output_dir)
-                summary["export_path"] = str(local_csv)
-                _log.info("  Exported: %s", local_csv.name)
+            # Count rows
+            with open(local_csv, encoding="utf-8") as f:
+                row_count = sum(1 for _ in f) - 1
+            summary["rows_exported"] = row_count
+        except RuntimeError as e:
+            _log.warning("Export failed: %s", e)
+            summary["export_error"] = str(e)
 
-                # Count rows
-                with open(local_csv, encoding="utf-8") as f:
-                    row_count = sum(1 for _ in f) - 1
-                summary["rows_exported"] = row_count
-            except RuntimeError as e:
-                _log.warning("Export failed: %s", e)
-                summary["export_error"] = str(e)
-        else:
-            _log.info("No files ingested — skipping export.")
+        # Copy as master.csv (always a full rebuild from the DB)
+        if summary.get("export_path"):
+            master_path = output_dir / "master.csv"
+            shutil.copy2(Path(summary["export_path"]), master_path)
+            _log.info("  master.csv written (%d rows)", summary.get("rows_exported", 0))
 
-        # --- Step 3b: Export issues to CSV ---
+        # Export issues
         issues_csv_path = _export_issues(db_path, output_dir)
         if issues_csv_path:
             with open(issues_csv_path, encoding="utf-8") as f:
@@ -195,90 +157,29 @@ def run_pipeline(
         else:
             summary["issues_exported"] = 0
 
-        # --- Step 4: Merge into master.csv on Drive ---
-        if use_drive and summary.get("export_path"):
-            _log.info("Merging into master.csv on Drive...")
-            local_csv = Path(summary["export_path"])
-
-            # Download existing master.csv (if any)
-            from njlead.drive import download_file_by_name, upload_file
-            existing_master = output_dir / "existing_master.csv"
-            has_existing = False
-            if not full_refresh:
-                has_existing = download_file_by_name(
-                    output_folder_id, "master.csv", existing_master,
-                )
-
-            merged_master = output_dir / "master.csv"
-            total_rows = _merge_csv(
-                existing_master if has_existing else None,
-                local_csv,
-                merged_master,
-                key_column="source_file",
-                source_files_this_run=processed_file_names,
-                full_refresh=full_refresh,
-            )
-            summary["master_rows"] = total_rows
-
-            upload_file(merged_master, output_folder_id, overwrite_name="master.csv")
-            _log.info("  master.csv uploaded (%d rows)", total_rows)
-
-            # Merge issues.csv
-            if issues_csv_path:
-                existing_issues = output_dir / "existing_issues.csv"
-                has_existing_issues = False
-                if not full_refresh:
-                    has_existing_issues = download_file_by_name(
-                        output_folder_id, "issues.csv", existing_issues,
-                    )
-                merged_issues = output_dir / "issues.csv"
-                issue_total = _merge_csv(
-                    existing_issues if has_existing_issues else None,
-                    issues_csv_path,
-                    merged_issues,
-                    key_column="source_file",
-                    source_files_this_run=processed_file_names,
-                    full_refresh=full_refresh,
-                )
-                upload_file(merged_issues, output_folder_id, overwrite_name="issues.csv")
-                summary["issues_rows"] = issue_total
-                _log.info("  issues.csv uploaded (%d rows)", issue_total)
-
-        elif local_folder and summary.get("export_path"):
-            # Local mode: just copy to working dir
-            local_csv = Path(summary["export_path"])
-            dest = Path.cwd() / "master.csv"
-            shutil.copy2(local_csv, dest)
-            _log.info("  master.csv written to %s", dest)
-
-        # --- Step 5: Move processed PDFs to Drive Processed folder ---
-        if use_drive and downloaded_files:
-            from njlead.drive import move_to_processed
-            _log.info("Moving processed PDFs to Drive Processed folder...")
-            moved = 0
-            for f in downloaded_files:
-                local_path = f.get("local_path")
-                if local_path and Path(local_path).name in processed_file_names:
-                    try:
-                        move_to_processed(input_folder_id, f)
-                        moved += 1
-                    except Exception as e:
-                        _log.warning("Failed to move %s: %s", f["name"], e)
-            summary["moved_to_processed"] = moved
-            _log.info("  %d file(s) moved", moved)
-
-        # --- Step 6: Write last_run.txt ---
-        if use_drive:
-            from njlead.drive import upload_text
-            report_text = _format_run_report(summary)
-            upload_text(report_text, output_folder_id, "last_run.txt")
-            _log.info("  last_run.txt uploaded to Drive output folder")
+        # --- Step 5: Record token usage and write last_run.txt ---
+        summary["token_usage"] = tracker.summary()
+        report_text = _format_run_report(summary)
+        last_run_path = output_dir / "last_run.txt"
+        last_run_path.write_text(report_text, encoding="utf-8")
+        _log.info("  last_run.txt written to output/")
 
         _log.info("Done!")
         return summary
 
+    except Exception:
+        # Write partial last_run.txt even on failure
+        try:
+            output_dir.mkdir(exist_ok=True)
+            summary["error"] = "Run failed — see log for details"
+            report_text = _format_run_report(summary)
+            (output_dir / "last_run.txt").write_text(report_text, encoding="utf-8")
+        except Exception:
+            pass
+        raise
+
     finally:
-        # Clean up temp DB env var (restore if it was set before)
+        # Clean up temp DB env var
         if "NJLEAD_DB" in os.environ:
             del os.environ["NJLEAD_DB"]
 
@@ -326,14 +227,44 @@ def _format_run_report(summary: dict) -> str:
         f"Mode:       {summary.get('mode', 'unknown')}",
         "",
         "Files",
-        f"  Downloaded:  {summary.get('downloaded', 'n/a')}",
+    ]
+
+    if summary.get("use_drive"):
+        lines.append(f"  On Drive:     {summary.get('drive_total', 'n/a')}")
+        lines.append(f"  Downloaded:   {summary.get('downloaded', 'n/a')}")
+    elif summary.get("local_folder"):
+        lines.append(f"  Local folder: {summary.get('local_folder')}")
+
+    lines.extend([
+        f"  Found:       {summary.get('total', 'n/a')}",
         f"  Ingested:    {summary.get('ingested', 0)}",
-        f"  Skipped:     {summary.get('skipped', 0)}",
+        f"  Skipped:     {summary.get('skipped', 0)}  (already in database)",
         f"  Failed:      {summary.get('failed', 0)}",
         "",
         "Output",
-        f"  Rows in master.csv:  {summary.get('master_rows', summary.get('rows_exported', 0))}",
-        f"  Rows in issues.csv:  {summary.get('issues_rows', summary.get('issues_exported', 0))}",
-        f"  Moved to Processed:  {summary.get('moved_to_processed', 0)}",
-    ]
+        f"  Rows in master.csv:  {summary.get('rows_exported', 0)}",
+        f"  Duplicates removed:  {summary.get('duplicates_removed', 0)}",
+        f"  Rows in issues.csv:  {summary.get('issues_exported', 0)}",
+    ])
+
+    # Token usage and cost
+    token_usage = summary.get("token_usage", {})
+    if token_usage:
+        lines.extend(["", "Token usage"])
+        for model, counts in sorted(token_usage.items()):
+            inp = counts.get("input", 0)
+            out = counts.get("output", 0)
+            calls = counts.get("calls", 0)
+            empty = counts.get("empty_calls", 0)
+            line = f"  {model:>8s}:  {inp:>8,} in / {out:>7,} out  ({calls} calls"
+            if empty:
+                line += f", {empty} empty"
+            line += ")"
+            lines.append(line)
+        cost = _estimate_cost(token_usage)
+        lines.append(f"  Estimated cost: ${cost:.2f}")
+
+    if summary.get("error"):
+        lines.extend(["", f"ERROR: {summary['error']}"])
+
     return "\n".join(lines) + "\n"
