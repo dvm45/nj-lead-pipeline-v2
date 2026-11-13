@@ -160,9 +160,45 @@ def ingest_report_llm(
     if not report.school_name and hints.get("school_name"):
         report.school_name = hints["school_name"]
 
-    # Store report_year on the document row
-    if report.report_year is not None:
-        doc.report_year = report.report_year
+    # Resolve report_year via fallback chain:
+    #   1. LLM's report_year
+    #   2. Latest sample_date or test_year in the report
+    #   3. Year parsed from the filename
+    #   4. Year parsed from the folder path
+    from njlead.ingest.year_parser import parse_year_from_filename, parse_year_from_path
+
+    report_year = report.report_year
+    report_year_source = "llm" if report_year else None
+
+    if report_year is None and report.measurements:
+        # Fallback 2: latest sample date or test_year across all measurements
+        years: list[int] = []
+        for m in report.measurements:
+            if m.sample_date is not None:
+                years.append(m.sample_date.year)
+            if m.test_year is not None:
+                years.append(m.test_year)
+        if years:
+            report_year = max(years)
+            report_year_source = "sample_date"
+
+    if report_year is None:
+        # Fallback 3: year from filename
+        report_year = parse_year_from_filename(pdf_path.name)
+        if report_year:
+            report_year_source = "filename"
+
+    if report_year is None:
+        # Fallback 4: year from folder path
+        report_year = parse_year_from_path(pdf_path)
+        if report_year:
+            report_year_source = "folder_path"
+
+    if report_year is not None:
+        doc.report_year = report_year
+    # Stash the source on the doc for the export to read
+    # (uses object.__setattr__ because Document is a SQLAlchemy model)
+    object.__setattr__(doc, "_report_year_source", report_year_source)
 
     # --- Sonnet verification pass ---
     # Conditional: skip verification for high-confidence, single-school,
