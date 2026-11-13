@@ -127,6 +127,7 @@ def _run_download_only() -> None:
     """Download PDFs from Drive without running extraction."""
     import os
 
+    from njlead import config  # noqa: F401 — triggers .env loading
     from njlead.drive import download_new_pdfs
 
     folder_id = os.environ.get("GDRIVE_INPUT_FOLDER_ID", "")
@@ -504,6 +505,7 @@ def find_duplicates(
     """
     import os
 
+    from njlead import config  # noqa: F401 — triggers .env loading
     from njlead.duplicates import find_all_duplicates
     from njlead.duplicates import find_duplicates as do_find_local
 
