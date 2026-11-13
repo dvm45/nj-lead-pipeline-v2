@@ -32,3 +32,10 @@ credentials/
 # OS noise
 .DS_Store
 Thumbs.db
+
+azure_train/
+*.csv
+_rerun*.txt
+nj_lead_pipeline_v2/
+export_paterson_*.py
+qaqc_paterson.py
