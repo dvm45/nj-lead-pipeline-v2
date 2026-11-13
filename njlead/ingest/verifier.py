@@ -314,9 +314,11 @@ def verify_report(
 
     for block in message.content:
         if getattr(block, "type", None) == "tool_use" and block.name == "verify_extraction":
+            from njlead.token_tracker import tracker
             result = block.input if isinstance(block.input, dict) else {}
             in_tok = message.usage.input_tokens
             out_tok = message.usage.output_tokens
+            tracker.record("sonnet", input_tokens=in_tok, output_tokens=out_tok)
             missed = result.get("missed_count", 0)
             flagged = len(result.get("flagged_rows", []))
             overall = result.get("overall_confidence", 1.0)
@@ -360,30 +362,18 @@ def apply_verification(
             report.district = suggested
             issues.append(f"District corrected: '{old}' -> '{report.district}'")
 
-    # Multi-school misattribution — downgrade all rows when the verifier
-    # says it's multi-school but rows aren't properly attributed
+    # Multi-school misattribution — log for review but keep all rows
     is_multi = findings.get("is_multi_school", False)
     attr_ok = findings.get("school_attribution_correct", True)
     if is_multi and not attr_ok:
-        for m in report.measurements:
-            m.confidence = min(m.confidence, 0.50)
         issues.append(
-            "Multi-school report with incorrect school attribution; "
-            "all rows downgraded to 0.50 confidence"
+            "Multi-school report with incorrect school attribution — manual review recommended"
         )
 
-    # Adjust confidence on flagged rows
-    flagged_ids = {r.get("sample_id") for r in findings.get("flagged_rows", [])}
-    for m in report.measurements:
-        if m.sample_id in flagged_ids:
-            m.confidence = min(m.confidence, 0.5)
-
-    # Downgrade overall confidence if verifier is uncertain
+    # Log overall confidence if verifier is uncertain (no row downgrade)
     overall = findings.get("overall_confidence", 1.0)
     if overall < 0.8:
-        for m in report.measurements:
-            m.confidence = min(m.confidence, overall)
-        issues.append(f"Verifier overall confidence low ({overall:.2f}); all rows downgraded")
+        issues.append(f"Verifier overall confidence low ({overall:.2f})")
 
     # Log missed measurements
     missed = findings.get("missed_count", 0)
